@@ -5,10 +5,12 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 
 	"encore.dev/beta/errs"
@@ -17,7 +19,7 @@ import (
 )
 
 //var db = sqldb.NewDatabase("user", sqldb.DatabaseConfig{
-//	Migrations: "./migrations",
+//	Migrations: "./migrationsz",
 //})
 
 type User struct {
@@ -100,17 +102,179 @@ func Register(ctx context.Context, req *RegisterRequest) (*RegisterResponse, err
 	//`, req.Email, hashedPassword, req.Name).Scan(
 	//	&user.ID, &user.Email, &user.Name, &user.CreatedAt,
 	//)
-
 	//if err != nil {
 	//	return nil, fmt.Errorf("failed to create user: %w", err)
 	//}
 
+	// Generate email verification token
+	token, err := generateVerificationToken()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate verification token: %w", err)
+	}
+
+	// Set token expiration (24 hours from now)
+	expiresAt := time.Now().Add(24 * time.Hour)
+
+	// Store verification token
+	// _, err = db.Exec(ctx, `
+	//    INSERT INTO email_verifications (user_id, token, expires_at)
+	//    VALUES ($1, $2, $3)
+	// `, userID, token, expiresAt)
+	//
+	// if err != nil {
+	//    return nil, fmt.Errorf("failed to store verification token: %w", err)
+	// }
+
+	// Send verification email
+	verificationURL := fmt.Sprintf("https://yourdomain.com/verify-email?token=%s", token)
+	err = sendVerificationEmail(req.Email, req.Name, verificationURL)
+	if err != nil {
+		// Log the error but don't fail registration
+		fmt.Printf("Failed to send verification email: %v\n", err)
+	}
+
 	return &RegisterResponse{
-		Message: "User registered successfully",
-		UserID:  1,
-		//UserID:  user.ID,
+		Message: "User registered successfully. Please check your email to verify your account.",
+		UserID:  1, // Replace with actual userID
 	}, nil
 
+}
+func generateVerificationToken() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(bytes), nil
+}
+
+// sendVerificationEmail sends the verification email to the user
+func sendVerificationEmail(email, name, verificationURL string) error {
+	// TODO: Implement actual email sending logic using your email service
+	// Example services: SendGrid, AWS SES, Mailgun, SMTP
+
+	subject := "Verify Your Email Address"
+	body := fmt.Sprintf(`
+		Hi %s,
+		
+		Thank you for registering! Please verify your email address by clicking the link below:
+		
+		%s
+		
+		This link will expire in 24 hours.
+		
+		If you didn't create an account, please ignore this email.
+		
+		Best regards,
+		Your Team
+	`, name, verificationURL)
+
+	// Placeholder for actual email sending
+	fmt.Printf("Sending email to %s with subject: %s\nBody: %s\n", email, subject, body)
+
+	return nil
+}
+
+func VerifyEmail(ctx context.Context, token string) error {
+	if token == "" {
+		return &errs.Error{
+			Code:    errs.InvalidArgument,
+			Message: "verification token is required",
+		}
+	}
+
+	// Check if token exists and is not expired
+	// var userID int64
+	// var expiresAt time.Time
+	// err := db.QueryRow(ctx, `
+	//    SELECT user_id, expires_at FROM email_verifications
+	//    WHERE token = $1
+	// `, token).Scan(&userID, &expiresAt)
+	//
+	// if err != nil {
+	//    return &errs.Error{
+	//       Code:    errs.NotFound,
+	//       Message: "invalid or expired verification token",
+	//    }
+	// }
+
+	// Check if token has expired
+	// if time.Now().After(expiresAt) {
+	//    return &errs.Error{
+	//       Code:    errs.InvalidArgument,
+	//       Message: "verification token has expired",
+	//    }
+	// }
+
+	// Update user's email_verified status
+	// _, err = db.Exec(ctx, `
+	//    UPDATE users SET email_verified = true WHERE id = $1
+	// `, userID)
+	//
+	// if err != nil {
+	//    return fmt.Errorf("failed to verify email: %w", err)
+	// }
+
+	// Delete the used verification token
+	// _, err = db.Exec(ctx, `
+	//    DELETE FROM email_verifications WHERE token = $1
+	// `, token)
+
+	return nil
+}
+
+// ResendVerificationEmail resends the verification email
+func ResendVerificationEmail(ctx context.Context, email string) error {
+	if email == "" {
+		return &errs.Error{
+			Code:    errs.InvalidArgument,
+			Message: "email is required",
+		}
+	}
+
+	// Check if user exists and is not already verified
+	// var userID int64
+	// var name string
+	// var emailVerified bool
+	// err := db.QueryRow(ctx, `
+	//    SELECT id, name, email_verified FROM users WHERE email = $1
+	// `, email).Scan(&userID, &name, &emailVerified)
+	//
+	// if err != nil {
+	//    return &errs.Error{
+	//       Code:    errs.NotFound,
+	//       Message: "user not found",
+	//    }
+	// }
+	//
+	// if emailVerified {
+	//    return &errs.Error{
+	//       Code:    errs.InvalidArgument,
+	//       Message: "email already verified",
+	//    }
+	// }
+
+	// Delete old verification tokens
+	// _, err = db.Exec(ctx, `
+	//    DELETE FROM email_verifications WHERE user_id = $1
+	// `, userID)
+
+	// Generate new token
+	token, err := generateVerificationToken()
+	if err != nil {
+		return fmt.Errorf("failed to generate verification token: %w", err)
+	}
+
+	expiresAt := time.Now().Add(24 * time.Hour)
+
+	// Store new verification token
+	// _, err = db.Exec(ctx, `
+	//    INSERT INTO email_verifications (user_id, token, expires_at)
+	//    VALUES ($1, $2, $3)
+	// `, userID, token, expiresAt)
+
+	// Send verification email
+	verificationURL := fmt.Sprintf("https://yourdomain.com/verify-email?token=%s", token)
+	return sendVerificationEmail(email, "User", verificationURL) // Replace "User" with actual name
 }
 
 type PasswordRules struct {
