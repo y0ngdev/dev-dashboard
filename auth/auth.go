@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
@@ -19,8 +21,13 @@ import (
 )
 
 //var db = sqldb.NewDatabase("user", sqldb.DatabaseConfig{
-//	Migrations: "./migrationsz",
+//	Migrations: "./migrations",
 //})
+
+// Secret for signing verification tokens
+var secrets struct {
+	SigningSecret string
+}
 
 type User struct {
 	ID        int64  `json:"id"`
@@ -106,6 +113,19 @@ func Register(ctx context.Context, req *RegisterRequest) (*RegisterResponse, err
 	//	return nil, fmt.Errorf("failed to create user: %w", err)
 	//}
 
+	response, err2 := funcName(err, req)
+	if err2 != nil {
+		return response, err2
+	}
+
+	return &RegisterResponse{
+		Message: "User registered successfully. Please check your email to verify your account.",
+		UserID:  1, // Replace with actual userID
+	}, nil
+
+}
+
+func funcName(err error, req *RegisterRequest) (*RegisterResponse, error) {
 	// Generate email verification token
 	token, err := generateVerificationToken()
 	if err != nil {
@@ -125,19 +145,18 @@ func Register(ctx context.Context, req *RegisterRequest) (*RegisterResponse, err
 	//    return nil, fmt.Errorf("failed to store verification token: %w", err)
 	// }
 
+	// Create signed verification token
+	signedToken := signToken(token, req.Email, expiresAt)
+
 	// Send verification email
-	verificationURL := fmt.Sprintf("https://yourdomain.com/verify-email?token=%s", token)
+	verificationURL := fmt.Sprintf("https://yourdomain.com/auth/verify/email?token=%s", signedToken)
+
 	err = sendVerificationEmail(req.Email, req.Name, verificationURL)
 	if err != nil {
 		// Log the error but don't fail registration
 		fmt.Printf("Failed to send verification email: %v\n", err)
 	}
-
-	return &RegisterResponse{
-		Message: "User registered successfully. Please check your email to verify your account.",
-		UserID:  1, // Replace with actual userID
-	}, nil
-
+	return nil, nil
 }
 func generateVerificationToken() (string, error) {
 	bytes := make([]byte, 32)
@@ -147,7 +166,68 @@ func generateVerificationToken() (string, error) {
 	return hex.EncodeToString(bytes), nil
 }
 
+// signToken creates a signed token containing: token.email.expiry.signature
+func signToken(token, email string, expiresAt time.Time) string {
+	// Create payload: token.email.expiry
+	expiry := fmt.Sprintf("%d", expiresAt.Unix())
+	payload := fmt.Sprintf("%s.%s.%s", token, email, expiry)
+
+	// Create HMAC signature
+	h := hmac.New(sha256.New, []byte(secrets.SigningSecret))
+	h.Write([]byte(payload))
+	signature := base64.URLEncoding.EncodeToString(h.Sum(nil))
+
+	// Return signed token: payload.signature
+	return fmt.Sprintf("%s.%s", payload, signature)
+}
+
+// verifySignedToken verifies and extracts data from a signed token
+func verifySignedToken(signedToken string) (token, email string, expiresAt time.Time, err error) {
+	// Split signed token into payload and signature
+	parts := strings.Split(signedToken, ".")
+	if len(parts) != 4 {
+		return "", "", time.Time{}, fmt.Errorf("invalid signed token format")
+	}
+
+	token = parts[0]
+	email = parts[1]
+	expiryStr := parts[2]
+	providedSignature := parts[3]
+
+	// Recreate payload and verify signature
+	payload := fmt.Sprintf("%s.%s.%s", token, email, expiryStr)
+	h := hmac.New(sha256.New, []byte(secrets.SigningSecret))
+	h.Write([]byte(payload))
+	expectedSignature := base64.URLEncoding.EncodeToString(h.Sum(nil))
+
+	if !hmac.Equal([]byte(expectedSignature), []byte(providedSignature)) {
+		return "", "", time.Time{}, fmt.Errorf("invalid token signature")
+	}
+
+	// Parse expiry time
+	var expiryUnix int64
+	_, err = fmt.Sscanf(expiryStr, "%d", &expiryUnix)
+	if err != nil {
+		return "", "", time.Time{}, fmt.Errorf("invalid expiry time")
+	}
+	expiresAt = time.Unix(expiryUnix, 0)
+
+	// Check if token has expired
+	if time.Now().After(expiresAt) {
+		return "", "", time.Time{}, fmt.Errorf("token has expired")
+	}
+
+	return token, email, expiresAt, nil
+}
+
+type EmailVerification struct {
+	Token     string
+	Email     string
+	ExpiresAt time.Time
+}
+
 // sendVerificationEmail sends the verification email to the user
+
 func sendVerificationEmail(email, name, verificationURL string) error {
 	// TODO: Implement actual email sending logic using your email service
 	// Example services: SendGrid, AWS SES, Mailgun, SMTP
@@ -174,34 +254,49 @@ func sendVerificationEmail(email, name, verificationURL string) error {
 	return nil
 }
 
-func VerifyEmail(ctx context.Context, token string) error {
-	if token == "" {
-		return &errs.Error{
+// VerifyEmailParams holds the verification request
+type VerifyEmailParams struct {
+	Token string `query:"token"`
+}
+
+// VerifyEmailResponse holds the verification response
+type VerifyEmailResponse struct {
+	Message string
+}
+
+// VerifyEmail is an Encore API endpoint that verifies the email using the signed token
+//
+//encore:api public method=GET path=/auth/verify/email
+func VerifyEmail(ctx context.Context, params *VerifyEmailParams) (*VerifyEmailResponse, error) {
+	if params.Token == "" {
+		return nil, &errs.Error{
 			Code:    errs.InvalidArgument,
-			Message: "verification token is required",
+			Message: "The link appears to be broken. Please request for another",
 		}
 	}
 
-	// Check if token exists and is not expired
+	// Verify and extract data from signed token
+	//token, email, _, err := verifySignedToken(params.Token)
+	//if err != nil {
+	//	return nil, &errs.Error{
+	//		Code:    errs.InvalidArgument,
+	//		Message: fmt.Sprintf("invalid or expired verification token: %v", err),
+	//	}
+	//}
+
+	// Verify the token exists in database and matches the email
 	// var userID int64
-	// var expiresAt time.Time
-	// err := db.QueryRow(ctx, `
-	//    SELECT user_id, expires_at FROM email_verifications
-	//    WHERE token = $1
-	// `, token).Scan(&userID, &expiresAt)
+	// var dbEmail string
+	// err = db.QueryRow(ctx, `
+	//    SELECT user_id, email FROM email_verifications ev
+	//    JOIN users u ON ev.user_id = u.id
+	//    WHERE ev.token = $1 AND u.email = $2
+	// `, token, email).Scan(&userID, &dbEmail)
 	//
 	// if err != nil {
-	//    return &errs.Error{
+	//    return nil, &errs.Error{
 	//       Code:    errs.NotFound,
-	//       Message: "invalid or expired verification token",
-	//    }
-	// }
-
-	// Check if token has expired
-	// if time.Now().After(expiresAt) {
-	//    return &errs.Error{
-	//       Code:    errs.InvalidArgument,
-	//       Message: "verification token has expired",
+	//       Message: "invalid verification token",
 	//    }
 	// }
 
@@ -211,7 +306,7 @@ func VerifyEmail(ctx context.Context, token string) error {
 	// `, userID)
 	//
 	// if err != nil {
-	//    return fmt.Errorf("failed to verify email: %w", err)
+	//    return nil, fmt.Errorf("failed to verify email: %w", err)
 	// }
 
 	// Delete the used verification token
@@ -219,13 +314,27 @@ func VerifyEmail(ctx context.Context, token string) error {
 	//    DELETE FROM email_verifications WHERE token = $1
 	// `, token)
 
-	return nil
+	return &VerifyEmailResponse{
+		Message: "Email verified successfully! You can now log in.",
+	}, nil
 }
 
-// ResendVerificationEmail resends the verification email
-func ResendVerificationEmail(ctx context.Context, email string) error {
-	if email == "" {
-		return &errs.Error{
+// ResendVerificationEmailParams holds the resend request
+type ResendVerificationEmailParams struct {
+	Email string `json:"email"`
+}
+
+// ResendVerificationEmailResponse holds the resend response
+type ResendVerificationEmailResponse struct {
+	Message string
+}
+
+// ResendVerificationEmail is an Encore API endpoint that resends the verification email
+//
+//encore:api public method=POST path=/auth/resend-verification
+func ResendVerificationEmail(ctx context.Context, params *ResendVerificationEmailParams) (*ResendVerificationEmailResponse, error) {
+	if params.Email == "" {
+		return nil, &errs.Error{
 			Code:    errs.InvalidArgument,
 			Message: "email is required",
 		}
@@ -237,17 +346,17 @@ func ResendVerificationEmail(ctx context.Context, email string) error {
 	// var emailVerified bool
 	// err := db.QueryRow(ctx, `
 	//    SELECT id, name, email_verified FROM users WHERE email = $1
-	// `, email).Scan(&userID, &name, &emailVerified)
+	// `, params.Email).Scan(&userID, &name, &emailVerified)
 	//
 	// if err != nil {
-	//    return &errs.Error{
+	//    return nil, &errs.Error{
 	//       Code:    errs.NotFound,
 	//       Message: "user not found",
 	//    }
 	// }
 	//
 	// if emailVerified {
-	//    return &errs.Error{
+	//    return nil, &errs.Error{
 	//       Code:    errs.InvalidArgument,
 	//       Message: "email already verified",
 	//    }
@@ -257,6 +366,40 @@ func ResendVerificationEmail(ctx context.Context, email string) error {
 	// _, err = db.Exec(ctx, `
 	//    DELETE FROM email_verifications WHERE user_id = $1
 	// `, userID)
+
+	// Generate new token
+	token, err := generateVerificationToken()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate verification token: %w", err)
+	}
+
+	expiresAt := time.Now().Add(24 * time.Hour)
+
+	// Store new verification token
+	// _, err = db.Exec(ctx, `
+	//    INSERT INTO email_verifications (user_id, token, expires_at)
+	//    VALUES ($1, $2, $3)
+	// `, userID, token, expiresAt)
+
+	// Create signed verification token
+	signedToken := signToken(token, params.Email, expiresAt)
+
+	// Generate verification URL with signed token
+	verificationURL := fmt.Sprintf("https://yourdomain.com/auth/verify?token=%s", signedToken)
+
+	// Send verification email
+	err = sendVerificationEmail(params.Email, "User", verificationURL) // Replace "User" with actual name
+	if err != nil {
+		return nil, fmt.Errorf("failed to send verification email: %w", err)
+	}
+
+	return &ResendVerificationEmailResponse{
+		Message: "Verification email sent successfully",
+	}, nil
+}
+
+// ResendVerificationEmail resends the verification email
+func ResendVerificationEmail(ctx context.Context, email string) error {
 
 	// Generate new token
 	token, err := generateVerificationToken()
