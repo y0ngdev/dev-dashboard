@@ -4,7 +4,9 @@
     <option name="autoReloadType" value="ALL" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="8ba38ec9-1ee8-4260-ad4d-a54c6b2d9750" name="Changes" comment="feat: Added email verification">
+    <list default="true" id="8ba38ec9-1ee8-4260-ad4d-a54c6b2d9750" name="Changes" comment="chore: refactoring">
+      <change afterPath="$PROJECT_DIR$/.secrets.local.cue" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/email/email.go" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/auth/auth.go" beforeDir="false" afterPath="$PROJECT_DIR$/auth/auth.go" afterDir="false" />
     </list>
@@ -57,6 +59,11 @@
     "run.code.analysis.last.selected.profile": "pProject Default"
   }
 }]]></component>
+  <component name="RecentsManager">
+    <key name="MoveFile.RECENT_KEYS">
+      <recent name="C:\Users\CB\Documents\prosper\dev-dashboard" />
+    </key>
+  </component>
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
@@ -81,7 +88,8 @@
   <component name="VcsManagerConfiguration">
     <MESSAGE value="feat: registration endpoint" />
     <MESSAGE value="feat: Added email verification" />
-    <option name="LAST_COMMIT_MESSAGE" value="feat: Added email verification" />
+    <MESSAGE value="chore: refactoring" />
+    <option name="LAST_COMMIT_MESSAGE" value="chore: refactoring" />
   </component>
   <component name="VgoProject">
     <settings-migrated>true</settings-migrated>
