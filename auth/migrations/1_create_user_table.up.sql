@@ -1,5 +1,3 @@
--- migrations/1_create_tables.up.sql
-
 -- Users table
 CREATE TABLE users (
                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

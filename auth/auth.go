@@ -12,13 +12,13 @@ import (
 	"unicode"
 
 	"encore.dev/beta/errs"
-	"encore.dev/storage/sqldb"
+	//"encore.dev/storage/sqldb"
 	"golang.org/x/crypto/argon2"
 )
 
-var db = sqldb.NewDatabase("user", sqldb.DatabaseConfig{
-	Migrations: "./migrations",
-})
+//var db = sqldb.NewDatabase("user", sqldb.DatabaseConfig{
+//	Migrations: "./migrations",
+//})
 
 type User struct {
 	ID        int64  `json:"id"`
@@ -59,11 +59,15 @@ func Register(ctx context.Context, req *RegisterRequest) (*RegisterResponse, err
 		return nil, errs.B().Code(errs.InvalidArgument).Msg("invalid email").Err()
 	}
 	//Check if user exists
-	var exists bool
-	_ = db.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)", req.Email).Scan(&exists)
-	if exists {
-		return nil, errs.B().Code(errs.AlreadyExists).Msg("user already exists").Err()
-	}
+	//var exists bool
+	//_ = db.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)", req.Email).Scan(&exists)
+	//if exists {
+	//	return nil, &errs.Error{
+	//		Code:    errs.AlreadyExists,
+	//		Message: "user already exists",
+	//	}
+	//
+	//}
 
 	//check if both password matches and if it fulfils
 	if err := ValidatePassword(req.Password, defaultRules); err != nil {
@@ -82,28 +86,29 @@ func Register(ctx context.Context, req *RegisterRequest) (*RegisterResponse, err
 	}
 
 	// Hash password
-	hashedPassword, err := hashPassword(req.Password)
+	_, err := hashPassword(req.Password)
 	if err != nil {
 		return nil, fmt.Errorf("failed to hash password: %w", err)
 	}
 
 	// Create user
-	var user User
-	err = db.QueryRow(ctx, `
-		INSERT INTO users (email, password, name)
-		VALUES ($1, $2, $3)
-		RETURNING id, email, name, created_at
-	`, req.Email, hashedPassword, req.Name).Scan(
-		&user.ID, &user.Email, &user.Name, &user.CreatedAt,
-	)
+	//var user User
+	//err = db.QueryRow(ctx, `
+	//	INSERT INTO users (email, password, name)
+	//	VALUES ($1, $2, $3)
+	//	RETURNING id, email, name, created_at
+	//`, req.Email, hashedPassword, req.Name).Scan(
+	//	&user.ID, &user.Email, &user.Name, &user.CreatedAt,
+	//)
 
-	if err != nil {
-		return nil, fmt.Errorf("failed to create user: %w", err)
-	}
+	//if err != nil {
+	//	return nil, fmt.Errorf("failed to create user: %w", err)
+	//}
 
 	return &RegisterResponse{
 		Message: "User registered successfully",
-		UserID:  user.ID,
+		UserID:  1,
+		//UserID:  user.ID,
 	}, nil
 
 }
@@ -232,7 +237,7 @@ func parseArgon2Hash(encodedHash string) (*Argon2Configuration, []byte, []byte, 
 	}
 
 	if components[1] != "argon2id" {
-		return nil, nil, nil, fmt.Errorf("unsupported algorithm: %migrations", components[1])
+		return nil, nil, nil, fmt.Errorf("unsupported algorithm: %s", components[1])
 	}
 
 	var version int
