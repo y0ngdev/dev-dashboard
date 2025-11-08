@@ -10,14 +10,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net/smtp"
 	"regexp"
 	"strings"
 	"time"
 	"unicode"
 
+	"encore.app/mailer"
 	"encore.dev/beta/errs"
-	"encore.dev/config"
 
 	//"encore.dev/storage/sqldb"
 	"golang.org/x/crypto/argon2"
@@ -119,7 +118,7 @@ func Register(ctx context.Context, req *RegisterRequest) (*RegisterResponse, err
 	//}
 
 	// Send verification email - REFACTORED: now uses shared function
-	if err := sendVerificationEmailWithToken(req.Email, req.Name); err != nil {
+	if err := sendVerificationEmailWithToken(ctx, req.Email, req.Name); err != nil {
 		// Log the error but don't fail registration
 		fmt.Printf("Failed to send verification email: %v\n", err)
 	}
@@ -131,7 +130,7 @@ func Register(ctx context.Context, req *RegisterRequest) (*RegisterResponse, err
 }
 
 // sendVerificationEmailWithToken generates a token and sends verification email
-func sendVerificationEmailWithToken(email, name string) error {
+func sendVerificationEmailWithToken(ctx context.Context, userEmail, name string) error {
 	// Generate email verification token
 	token, err := generateVerificationToken()
 	if err != nil {
@@ -142,13 +141,20 @@ func sendVerificationEmailWithToken(email, name string) error {
 	expiresAt := time.Now().Add(24 * time.Hour)
 
 	// Create signed verification token
-	signedToken := signToken(token, email, expiresAt)
+	signedToken := signToken(token, userEmail, expiresAt)
 
 	// Generate verification URL with signed token
 	verificationURL := fmt.Sprintf("https://yourdomain.com/auth/verify/email?token=%s", signedToken)
 
-	// Send verification email
-	return sendVerificationEmail(email, name, verificationURL)
+	// Send verification email using the mail service
+	return mailer.SendTemplate(ctx, &mailer.SendTemplateRequest{
+		To:           userEmail,
+		TemplateName: "verification",
+		Data: map[string]string{
+			"name": name,
+			"url":  verificationURL,
+		},
+	})
 }
 
 // generateVerificationToken creates a secure random token
@@ -212,84 +218,6 @@ func verifySignedToken(signedToken string) (token, email string, expiresAt time.
 	}
 
 	return token, email, expiresAt, nil
-}
-
-// sendVerificationEmail sends the verification email to the user
-func sendVerificationEmail(email, name, verificationURL string) error {
-	// Initialize Resend client
-	client := resend.NewClient(secrets.ResendAPIKey)
-
-	// Create HTML email body
-	htmlBody := fmt.Sprintf(`
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-    <div style="background-color: #f8f9fa; border-radius: 10px; padding: 30px; margin-bottom: 20px;">
-        <h1 style="color: #2c3e50; margin-bottom: 20px;">Verify Your Email Address</h1>
-        <p style="font-size: 16px; margin-bottom: 20px;">Hi %s,</p>
-        <p style="font-size: 16px; margin-bottom: 20px;">
-            Thank you for registering! Please verify your email address by clicking the button below:
-        </p>
-        <div style="text-align: center; margin: 30px 0;">
-            <a href="%s"
-               style="background-color: #007bff; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">
-                Verify Email Address
-            </a>
-        </div>
-        <p style="font-size: 14px; color: #666; margin-top: 30px;">
-            Or copy and paste this link into your browser:<br>
-            <a href="%s" style="color: #007bff; word-break: break-all;">%s</a>
-        </p>
-        <p style="font-size: 14px; color: #666; margin-top: 20px;">
-            This link will expire in 24 hours.
-        </p>
-        <p style="font-size: 14px; color: #666; margin-top: 20px;">
-            If you didn't create an account, please ignore this email.
-        </p>
-    </div>
-    <div style="text-align: center; color: #999; font-size: 12px;">
-        <p>© 2024 %s. All rights reserved.</p>
-    </div>
-</body>
-</html>
-`, name, verificationURL, verificationURL, verificationURL, secrets.FromName)
-
-	// Create plain text version as fallback
-	textBody := fmt.Sprintf(`
-Hi %s,
-
-Thank you for registering! Please verify your email address by clicking the link below:
-
-%s
-
-This link will expire in 24 hours.
-
-If you didn't create an account, please ignore this email.
-
-Best regards,
-%s
-`, name, verificationURL, secrets.FromName)
-
-	// Send email using Resend
-	params := &resend.SendEmailRequest{
-		From:    fmt.Sprintf("%s <%s>", secrets.FromName, secrets.FromEmail),
-		To:      []string{email},
-		Subject: "Verify Your Email Address",
-		Html:    htmlBody,
-		Text:    textBody,
-	}
-
-	sent, err := client.Emails.Send(params)
-	if err != nil {
-		return fmt.Errorf("failed to send email: %w", err)
-	}
-
-	fmt.Printf("Email sent successfully! ID: %s\n", sent.Id)
-	return nil
 }
 
 // VerifyEmailParams holds the verification request
