@@ -12,15 +12,20 @@ import (
 	"unicode"
 
 	"encore.dev/beta/errs"
+	"encore.dev/storage/sqldb"
 	"golang.org/x/crypto/argon2"
 )
 
+var db = sqldb.NewDatabase("user", sqldb.DatabaseConfig{
+	Migrations: "./migrations",
+})
+
 type User struct {
-	ID       int64  `json:"id"`
-	Name     string `json:"name"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
-	Created  int64  `json:"created"`
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Email     string `json:"email"`
+	Password  string `json:"-"`
+	CreatedAt int64  `json:"created"`
 }
 type RegisterRequest struct {
 	Name            string `json:"name"`
@@ -31,6 +36,7 @@ type RegisterRequest struct {
 
 type RegisterResponse struct {
 	Message string
+	UserID  int64
 }
 
 //encore:api public method=POST path=/register
@@ -52,12 +58,12 @@ func Register(ctx context.Context, req *RegisterRequest) (*RegisterResponse, err
 	if !re.MatchString(req.Email) {
 		return nil, errs.B().Code(errs.InvalidArgument).Msg("invalid email").Err()
 	}
-	// Check if user exists
-	//var exists bool
-	//_ = db.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)", req.Email).Scan(&exists)
-	//if exists {
-	//	return nil, errs.B().Code(errs.AlreadyExists).Msg("user already exists").Err()
-	//}
+	//Check if user exists
+	var exists bool
+	_ = db.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)", req.Email).Scan(&exists)
+	if exists {
+		return nil, errs.B().Code(errs.AlreadyExists).Msg("user already exists").Err()
+	}
 
 	//check if both password matches and if it fulfils
 	if err := ValidatePassword(req.Password, defaultRules); err != nil {
@@ -75,22 +81,31 @@ func Register(ctx context.Context, req *RegisterRequest) (*RegisterResponse, err
 		}
 	}
 
-	// Create user
-	//var user User
-	//err := db.QueryRow(ctx, `
-	//	INSERT INTO users (email, password_hash, name)
-	//	VALUES ($1, $2, $3)
-	//	RETURNING id, email, name, created_at
-	//`, req.Email, hashPassword(req.Password), req.Name).Scan(
-	//	&user.ID, &user.Email, &user.Name, &user.CreatedAt,
-	//)
-	password, err := hashPassword(req.Password)
+	// Hash password
+	hashedPassword, err := hashPassword(req.Password)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to hash password: %w", err)
 	}
 
-	msg := fmt.Sprintf("Hello, %s!", string(password))
-	return &RegisterResponse{Message: msg}, nil
+	// Create user
+	var user User
+	err = db.QueryRow(ctx, `
+		INSERT INTO users (email, password, name)
+		VALUES ($1, $2, $3)
+		RETURNING id, email, name, created_at
+	`, req.Email, hashedPassword, req.Name).Scan(
+		&user.ID, &user.Email, &user.Name, &user.CreatedAt,
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to create user: %w", err)
+	}
+
+	return &RegisterResponse{
+		Message: "User registered successfully",
+		UserID:  user.ID,
+	}, nil
+
 }
 
 type PasswordRules struct {
@@ -217,7 +232,7 @@ func parseArgon2Hash(encodedHash string) (*Argon2Configuration, []byte, []byte, 
 	}
 
 	if components[1] != "argon2id" {
-		return nil, nil, nil, fmt.Errorf("unsupported algorithm: %s", components[1])
+		return nil, nil, nil, fmt.Errorf("unsupported algorithm: %migrations", components[1])
 	}
 
 	var version int
@@ -247,4 +262,34 @@ func parseArgon2Hash(encodedHash string) (*Argon2Configuration, []byte, []byte, 
 	config.KeyLength = uint32(len(hash))
 
 	return config, salt, hash, nil
+}
+
+type ChangePasswordRequest struct {
+	OldPassword     string `json:"oldPassword"`
+	NewPassword     string `json:"newPassword"`
+	ConfirmPassword string `json:"confirmPassword"`
+}
+
+//encosre:api auth method=POST path=/auth/change-password
+func ChangePassword(ctx context.Context, req *ChangePasswordRequest) error {
+	// Validate new password matches
+	if err := ValidatePasswordMatch(req.NewPassword, req.ConfirmPassword); err != nil {
+		return &errs.Error{
+			Code:    errs.InvalidArgument,
+			Message: err.Error(),
+		}
+	}
+
+	// Validate new password rules
+	if err := ValidatePassword(req.NewPassword, defaultRules); err != nil {
+		return &errs.Error{
+			Code:    errs.InvalidArgument,
+			Message: err.Error(),
+		}
+	}
+
+	// Verify old password and update
+	// ... your update logic here
+
+	return nil
 }
