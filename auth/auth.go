@@ -117,11 +117,20 @@ func Register(ctx context.Context, req *RegisterRequest) (*RegisterResponse, err
 	//	return nil, fmt.Errorf("failed to create user: %w", err)
 	//}
 
-	// Send verification email - REFACTORED: now uses shared function
-	if err := sendVerificationEmailWithToken(ctx, req.Email, req.Name); err != nil {
+	if _, err := sendVerificationEmailWithToken(ctx, req.Email, req.Name); err != nil {
+		//if token, err := sendVerificationEmailWithToken(ctx, req.Email, req.Name); err != nil {
 		// Log the error but don't fail registration
 		fmt.Printf("Failed to send verification email: %v\n", err)
 	}
+	// Store verification token
+	// _, err = db.Exec(ctx, `
+	//    INSERT INTO email_verifications (user_id, token, expires_at)
+	//    VALUES ($1, $2, $3)
+	// `, &user.ID, token, expiresAt)
+	//
+	// if err != nil {
+	//    return nil, fmt.Errorf("failed to store verification token: %w", err)
+	// }
 
 	return &RegisterResponse{
 		Message: "User registered successfully. Please check your email to verify your account.",
@@ -130,11 +139,11 @@ func Register(ctx context.Context, req *RegisterRequest) (*RegisterResponse, err
 }
 
 // sendVerificationEmailWithToken generates a token and sends verification email
-func sendVerificationEmailWithToken(ctx context.Context, userEmail, name string) error {
+func sendVerificationEmailWithToken(ctx context.Context, userEmail, name string) (string, error) {
 	// Generate email verification token
 	token, err := generateVerificationToken()
 	if err != nil {
-		return fmt.Errorf("failed to generate verification token: %w", err)
+		return "", fmt.Errorf("failed to generate verification token: %w", err)
 	}
 
 	// Set token expiration (24 hours from now)
@@ -147,7 +156,7 @@ func sendVerificationEmailWithToken(ctx context.Context, userEmail, name string)
 	verificationURL := fmt.Sprintf("https://yourdomain.com/auth/verify/email?token=%s", signedToken)
 
 	// Send verification email using the mail service
-	return mailer.SendTemplate(ctx, &mailer.SendTemplateRequest{
+	return token, mailer.SendTemplate(ctx, &mailer.SendTemplateRequest{
 		To:           userEmail,
 		TemplateName: "verification",
 		Data: map[string]string{
@@ -334,31 +343,21 @@ func ResendVerificationEmail(ctx context.Context, params *ResendVerificationEmai
 	//    DELETE FROM email_verifications WHERE user_id = $1
 	// `, userID)
 
-	// Generate new token
-	token, err := generateVerificationToken()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate verification token: %w", err)
+	if _, err := sendVerificationEmailWithToken(ctx, params.Email, params.Name); err != nil {
+		//if token, err := sendVerificationEmailWithToken(ctx, req.Email, req.Name); err != nil {
+		// Log the error but don't fail registration
+		fmt.Printf("Failed to send verification email: %v\n", err)
 	}
 
-	expiresAt := time.Now().Add(24 * time.Hour)
-
-	// Store new verification token
+	// Store verification token
 	// _, err = db.Exec(ctx, `
 	//    INSERT INTO email_verifications (user_id, token, expires_at)
 	//    VALUES ($1, $2, $3)
 	// `, userID, token, expiresAt)
-
-	// Create signed verification token
-	signedToken := signToken(token, params.Email, expiresAt)
-
-	// Generate verification URL with signed token
-	verificationURL := fmt.Sprintf("https://yourdomain.com/auth/verify?token=%s", signedToken)
-
-	// Send verification email
-	err = sendVerificationEmail(params.Email, params.Name, verificationURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send verification email: %w", err)
-	}
+	//
+	// if err != nil {
+	//    return nil, fmt.Errorf("failed to store verification token: %w", err)
+	// }
 
 	return &ResendVerificationEmailResponse{
 		Message: "Verification email sent successfully",
@@ -528,7 +527,13 @@ type ChangePasswordRequest struct {
 }
 
 //encore:api public method=POST path=/auth/change-password
+
 func ChangePassword(ctx context.Context, req *ChangePasswordRequest) error {
+	// Get current user ID from auth context
+	// userID := auth.UserID()
+
+	// TODO: Fetch user from database
+	// TODO: Verify current password with VerifyPassword(storedHash, req.CurrentPassword)
 
 	// Validate new password rules
 	if err := ValidatePassword(req.NewPassword, defaultRules); err != nil {
@@ -538,7 +543,7 @@ func ChangePassword(ctx context.Context, req *ChangePasswordRequest) error {
 		}
 	}
 
-	// Validate new password matches
+	// Validate password match
 	if err := ValidatePasswordMatch(req.NewPassword, req.ConfirmPassword); err != nil {
 		return &errs.Error{
 			Code:    errs.InvalidArgument,
@@ -546,8 +551,28 @@ func ChangePassword(ctx context.Context, req *ChangePasswordRequest) error {
 		}
 	}
 
-	// Verify old password and update
-	// ... your update logic here
+	// Ensure new password is different from old
+	// if err := VerifyPassword(storedHash, req.NewPassword); err == nil {
+	//     return &errs.Error{
+	//         Code:    errs.InvalidArgument,
+	//         Message: "new password must be different from current password",
+	//     }
+	// }
+
+	// Hash new password
+	hashedPassword, err := hashPassword(req.NewPassword)
+	if err != nil {
+		return &errs.Error{
+			Code:    errs.Internal,
+			Message: "failed to process password",
+		}
+	}
+
+	// TODO: Update password in database
+	// TODO: Invalidate all existing sessions
+	// TODO: Send confirmation email
+
+	_ = hashedPassword // Use the hashed password in your DB update
 
 	return nil
 }
