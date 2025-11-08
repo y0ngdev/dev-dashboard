@@ -16,6 +16,7 @@ import (
 	"unicode"
 
 	"encore.dev/beta/errs"
+
 	//"encore.dev/storage/sqldb"
 	"golang.org/x/crypto/argon2"
 )
@@ -28,6 +29,8 @@ import (
 var secrets struct {
 	SigningSecret string
 }
+
+//var _ = config.Load(ctx, &secrets)
 
 type User struct {
 	ID        int64  `json:"id"`
@@ -48,18 +51,17 @@ type RegisterResponse struct {
 	UserID  int64
 }
 
-//encore:api public method=POST path=/register
+//encore:api public method=POST path=/auth/register
 func Register(ctx context.Context, req *RegisterRequest) (*RegisterResponse, error) {
 
 	if req.Name == "" || req.Email == "" || req.Password == "" || req.ConfirmPassword == "" {
-
 		return nil, &errs.Error{
 			Code:    errs.InvalidArgument,
 			Message: "missing required fields",
 		}
 	}
 
-	//check if the email follows the valid definitions,
+	// Check if the email follows the valid definitions
 	emailRegex := `^[a-zA-Z0-9.!#$%&'*+/=?^_` + "`" + `{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`
 
 	re := regexp.MustCompile(emailRegex)
@@ -67,7 +69,8 @@ func Register(ctx context.Context, req *RegisterRequest) (*RegisterResponse, err
 	if !re.MatchString(req.Email) {
 		return nil, errs.B().Code(errs.InvalidArgument).Msg("invalid email").Err()
 	}
-	//Check if user exists
+
+	// Check if user exists
 	//var exists bool
 	//_ = db.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)", req.Email).Scan(&exists)
 	//if exists {
@@ -75,10 +78,9 @@ func Register(ctx context.Context, req *RegisterRequest) (*RegisterResponse, err
 	//		Code:    errs.AlreadyExists,
 	//		Message: "user already exists",
 	//	}
-	//
 	//}
 
-	//check if both password matches and if it fulfils
+	// Check if both password matches and if it fulfils
 	if err := ValidatePassword(req.Password, defaultRules); err != nil {
 		return nil, &errs.Error{
 			Code:    errs.InvalidArgument,
@@ -103,8 +105,8 @@ func Register(ctx context.Context, req *RegisterRequest) (*RegisterResponse, err
 	// Create user
 	//var user User
 	//err = db.QueryRow(ctx, `
-	//	INSERT INTO users (email, password, name)
-	//	VALUES ($1, $2, $3)
+	//	INSERT INTO users (email, password, name, email_verified)
+	//	VALUES ($1, $2, $3, false)
 	//	RETURNING id, email, name, created_at
 	//`, req.Email, hashedPassword, req.Name).Scan(
 	//	&user.ID, &user.Email, &user.Name, &user.CreatedAt,
@@ -113,51 +115,40 @@ func Register(ctx context.Context, req *RegisterRequest) (*RegisterResponse, err
 	//	return nil, fmt.Errorf("failed to create user: %w", err)
 	//}
 
-	response, err2 := funcName(err, req)
-	if err2 != nil {
-		return response, err2
+	// Send verification email - REFACTORED: now uses shared function
+	if err := sendVerificationEmailWithToken(req.Email, req.Name); err != nil {
+		// Log the error but don't fail registration
+		fmt.Printf("Failed to send verification email: %v\n", err)
 	}
 
 	return &RegisterResponse{
 		Message: "User registered successfully. Please check your email to verify your account.",
 		UserID:  1, // Replace with actual userID
 	}, nil
-
 }
 
-func funcName(err error, req *RegisterRequest) (*RegisterResponse, error) {
+// sendVerificationEmailWithToken generates a token and sends verification email
+func sendVerificationEmailWithToken(email, name string) error {
 	// Generate email verification token
 	token, err := generateVerificationToken()
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate verification token: %w", err)
+		return fmt.Errorf("failed to generate verification token: %w", err)
 	}
 
 	// Set token expiration (24 hours from now)
 	expiresAt := time.Now().Add(24 * time.Hour)
 
-	// Store verification token
-	// _, err = db.Exec(ctx, `
-	//    INSERT INTO email_verifications (user_id, token, expires_at)
-	//    VALUES ($1, $2, $3)
-	// `, userID, token, expiresAt)
-	//
-	// if err != nil {
-	//    return nil, fmt.Errorf("failed to store verification token: %w", err)
-	// }
-
 	// Create signed verification token
-	signedToken := signToken(token, req.Email, expiresAt)
+	signedToken := signToken(token, email, expiresAt)
 
-	// Send verification email
+	// Generate verification URL with signed token
 	verificationURL := fmt.Sprintf("https://yourdomain.com/auth/verify/email?token=%s", signedToken)
 
-	err = sendVerificationEmail(req.Email, req.Name, verificationURL)
-	if err != nil {
-		// Log the error but don't fail registration
-		fmt.Printf("Failed to send verification email: %v\n", err)
-	}
-	return nil, nil
+	// Send verification email
+	return sendVerificationEmail(email, name, verificationURL)
 }
+
+// generateVerificationToken creates a secure random token
 func generateVerificationToken() (string, error) {
 	bytes := make([]byte, 32)
 	if _, err := rand.Read(bytes); err != nil {
@@ -220,14 +211,7 @@ func verifySignedToken(signedToken string) (token, email string, expiresAt time.
 	return token, email, expiresAt, nil
 }
 
-type EmailVerification struct {
-	Token     string
-	Email     string
-	ExpiresAt time.Time
-}
-
 // sendVerificationEmail sends the verification email to the user
-
 func sendVerificationEmail(email, name, verificationURL string) error {
 	// TODO: Implement actual email sending logic using your email service
 	// Example services: SendGrid, AWS SES, Mailgun, SMTP
@@ -322,6 +306,7 @@ func VerifyEmail(ctx context.Context, params *VerifyEmailParams) (*VerifyEmailRe
 // ResendVerificationEmailParams holds the resend request
 type ResendVerificationEmailParams struct {
 	Email string `json:"email"`
+	Name  string `json:"name"`
 }
 
 // ResendVerificationEmailResponse holds the resend response
@@ -388,7 +373,7 @@ func ResendVerificationEmail(ctx context.Context, params *ResendVerificationEmai
 	verificationURL := fmt.Sprintf("https://yourdomain.com/auth/verify?token=%s", signedToken)
 
 	// Send verification email
-	err = sendVerificationEmail(params.Email, "User", verificationURL) // Replace "User" with actual name
+	err = sendVerificationEmail(params.Email, params.Name, verificationURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send verification email: %w", err)
 	}
@@ -396,28 +381,6 @@ func ResendVerificationEmail(ctx context.Context, params *ResendVerificationEmai
 	return &ResendVerificationEmailResponse{
 		Message: "Verification email sent successfully",
 	}, nil
-}
-
-// ResendVerificationEmail resends the verification email
-func ResendVerificationEmail(ctx context.Context, email string) error {
-
-	// Generate new token
-	token, err := generateVerificationToken()
-	if err != nil {
-		return fmt.Errorf("failed to generate verification token: %w", err)
-	}
-
-	expiresAt := time.Now().Add(24 * time.Hour)
-
-	// Store new verification token
-	// _, err = db.Exec(ctx, `
-	//    INSERT INTO email_verifications (user_id, token, expires_at)
-	//    VALUES ($1, $2, $3)
-	// `, userID, token, expiresAt)
-
-	// Send verification email
-	verificationURL := fmt.Sprintf("https://yourdomain.com/verify-email?token=%s", token)
-	return sendVerificationEmail(email, "User", verificationURL) // Replace "User" with actual name
 }
 
 type PasswordRules struct {
@@ -582,18 +545,19 @@ type ChangePasswordRequest struct {
 	ConfirmPassword string `json:"confirmPassword"`
 }
 
-//encosre:api auth method=POST path=/auth/change-password
+//encore:api public method=POST path=/auth/change-password
 func ChangePassword(ctx context.Context, req *ChangePasswordRequest) error {
-	// Validate new password matches
-	if err := ValidatePasswordMatch(req.NewPassword, req.ConfirmPassword); err != nil {
+
+	// Validate new password rules
+	if err := ValidatePassword(req.NewPassword, defaultRules); err != nil {
 		return &errs.Error{
 			Code:    errs.InvalidArgument,
 			Message: err.Error(),
 		}
 	}
 
-	// Validate new password rules
-	if err := ValidatePassword(req.NewPassword, defaultRules); err != nil {
+	// Validate new password matches
+	if err := ValidatePasswordMatch(req.NewPassword, req.ConfirmPassword); err != nil {
 		return &errs.Error{
 			Code:    errs.InvalidArgument,
 			Message: err.Error(),
