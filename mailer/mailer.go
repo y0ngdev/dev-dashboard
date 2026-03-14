@@ -10,7 +10,7 @@ import (
 var secrets struct {
 	FromEmail string
 	FromName  string
-
+	
 	// SMTP Configuration (works with all providers)
 	SMTPHost     string
 	SMTPPort     string
@@ -39,7 +39,7 @@ func Send(ctx context.Context, req *EmailRequest) error {
 	if req.HTML == "" && req.Text == "" {
 		return fmt.Errorf("email must have either HTML or text content")
 	}
-
+	
 	return sendViaSMTP(req)
 }
 
@@ -56,7 +56,7 @@ func SendTemplate(ctx context.Context, req *SendTemplateRequest) error {
 	if err != nil {
 		return fmt.Errorf("failed to get template: %w", err)
 	}
-
+	
 	return Send(ctx, &EmailRequest{
 		To:      req.To,
 		Subject: template.Subject,
@@ -100,7 +100,7 @@ func getTemplate(name string, data map[string]string) (*EmailTemplate, error) {
 func buildVerificationHTML(data map[string]string) string {
 	name := data["name"]
 	url := data["url"]
-
+	
 	return fmt.Sprintf(`
 <!DOCTYPE html>
 <html>
@@ -143,7 +143,7 @@ func buildVerificationHTML(data map[string]string) string {
 func buildVerificationText(data map[string]string) string {
 	name := data["name"]
 	url := data["url"]
-
+	
 	return fmt.Sprintf(`
 Hi %s,
 
@@ -163,7 +163,7 @@ Best regards,
 func buildPasswordResetHTML(data map[string]string) string {
 	name := data["name"]
 	url := data["url"]
-
+	
 	return fmt.Sprintf(`
 <!DOCTYPE html>
 <html>
@@ -206,7 +206,7 @@ func buildPasswordResetHTML(data map[string]string) string {
 func buildPasswordResetText(data map[string]string) string {
 	name := data["name"]
 	url := data["url"]
-
+	
 	return fmt.Sprintf(`
 Hi %s,
 
@@ -225,7 +225,7 @@ Best regards,
 
 func buildWelcomeHTML(data map[string]string) string {
 	name := data["name"]
-
+	
 	return fmt.Sprintf(`
 <!DOCTYPE html>
 <html>
@@ -257,7 +257,7 @@ func buildWelcomeHTML(data map[string]string) string {
 
 func buildWelcomeText(data map[string]string) string {
 	name := data["name"]
-
+	
 	return fmt.Sprintf(`
 Hi %s,
 
@@ -275,7 +275,7 @@ Best regards,
 // sendViaSMTP sends email via SMTP
 func sendViaSMTP(req *EmailRequest) error {
 	from := fmt.Sprintf("%s <%s>", secrets.FromName, secrets.FromEmail)
-
+	
 	// Build email message with MIME for HTML
 	message := []byte(
 		"From: " + from + "\r\n" +
@@ -296,15 +296,15 @@ func sendViaSMTP(req *EmailRequest) error {
 			"\r\n" +
 			"--boundary123--",
 	)
-
+	
 	auth := smtp.PlainAuth("", secrets.SMTPUsername, secrets.SMTPPassword, secrets.SMTPHost)
 	addr := fmt.Sprintf("%s:%d", secrets.SMTPHost, secrets.SMTPPort)
-
+	
 	err := smtp.SendMail(addr, auth, secrets.FromEmail, []string{req.To}, message)
 	if err != nil {
 		return fmt.Errorf("failed to send email via SMTP: %w", err)
 	}
-
+	
 	fmt.Printf("Email sent successfully via SMTP to: %s\n", req.To)
 	return nil
 }

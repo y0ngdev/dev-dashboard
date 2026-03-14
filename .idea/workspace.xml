@@ -5,15 +5,21 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="8ba38ec9-1ee8-4260-ad4d-a54c6b2d9750" name="Changes" comment="chore: refactoring">
+      <change beforePath="$PROJECT_DIR$/.idea/dev-dashboard.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/dev-dashboard.iml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/modules.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.secrets.local.cue" beforeDir="false" afterPath="$PROJECT_DIR$/.secrets.local.cue" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/auth/auth.go" beforeDir="false" afterPath="$PROJECT_DIR$/auth/auth.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/auth/migrationsz/1_create_user_table.up.sql" beforeDir="false" afterPath="$PROJECT_DIR$/auth/migrations/1_create_user_table.up.sql" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/mailer/mailer.go" beforeDir="false" afterPath="$PROJECT_DIR$/mailer/mailer.go" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
-  <component name="GOROOT" url="file://$USER_HOME$/go/go1.25.3" />
+  <component name="GOROOT" url="file://$PROJECT_DIR$/../../../../usr/local/go" />
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
@@ -39,6 +45,7 @@
     "ASKED_SHARE_PROJECT_CONFIGURATION_FILES": "true",
     "ModuleVcsDetector.initialDetectionPerformed": "true",
     "RunOnceActivity.GoLinterPluginOnboarding": "true",
+    "RunOnceActivity.GoLinterPluginOnboardingV2": "true",
     "RunOnceActivity.GoLinterPluginStorageMigration": "true",
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
@@ -46,15 +53,21 @@
     "RunOnceActivity.go.formatter.settings.were.checked": "true",
     "RunOnceActivity.go.migrated.go.modules.settings": "true",
     "RunOnceActivity.go.modules.go.list.on.any.changes.was.set": "true",
+    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
     "SHARE_PROJECT_CONFIGURATION_FILES": "true",
+    "com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultModelSelectionForGA.v1": "true",
     "git-widget-placeholder": "dev",
     "go.import.settings.migrated": "true",
     "go.sdk.automatically.set": "true",
-    "last_opened_file_path": "C:/Users/CB",
+    "ignore.virus.scanning.warn.message": "true",
+    "junie.onboarding.icon.badge.shown": "true",
+    "last_opened_file_path": "//wsl.localhost/Ubuntu/home/yongdev/www/dev-dashboard",
     "node.js.detected.package.eslint": "true",
     "node.js.selected.package.eslint": "(autodetect)",
     "nodejs_package_manager_path": "npm",
-    "run.code.analysis.last.selected.profile": "pProject Default"
+    "run.code.analysis.last.selected.profile": "pProject Default",
+    "settings.editor.selected.configurable": "application.passwordSafe",
+    "to.speed.mode.migration.done": "true"
   }
 }]]></component>
   <component name="RecentsManager">
@@ -65,8 +78,8 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-gosdk-f466f9b0953e-146d08934cbf-org.jetbrains.plugins.go.sharedIndexes.bundled-GO-252.27397.100" />
-        <option value="bundled-js-predefined-d6986cc7102b-3aa1da707db6-JavaScript-GO-252.27397.100" />
+        <option value="bundled-gosdk-72a9cf600ed8-448e06e64ec5-org.jetbrains.plugins.go.sharedIndexes.bundled-GO-253.28294.337" />
+        <option value="bundled-js-predefined-d6986cc7102b-c7e53b3be11b-JavaScript-GO-253.28294.337" />
       </set>
     </attachedChunks>
   </component>
@@ -88,8 +101,5 @@
     <MESSAGE value="feat: Added email verification" />
     <MESSAGE value="chore: refactoring" />
     <option name="LAST_COMMIT_MESSAGE" value="chore: refactoring" />
-  </component>
-  <component name="VgoProject">
-    <settings-migrated>true</settings-migrated>
   </component>
 </project>
