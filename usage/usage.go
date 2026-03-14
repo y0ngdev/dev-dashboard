@@ -10,8 +10,10 @@ import (
 	"encore.dev/storage/sqldb"
 )
 
-// usage service shares the "user" database owned by the auth service.
-var db = sqldb.Named("user")
+// usage service owns the "usage" database.
+var db = sqldb.NewDatabase("usage", sqldb.DatabaseConfig{
+	Migrations: "./migrations",
+})
 
 // ---------------------------------------------------------------------------
 // Types

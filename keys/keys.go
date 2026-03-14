@@ -3,32 +3,97 @@ package keys
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
-	"fmt"
-	"time"
+
+	"github.com/agentstation/publicid"
+	"github.com/agentstation/utc"
 
 	"encore.dev/beta/auth"
 	"encore.dev/beta/errs"
 	"encore.dev/storage/sqldb"
 )
 
-// keys service shares the "user" database owned by the auth service.
-var db = sqldb.Named("user")
+// keys service owns the "keys" database.
+var db = sqldb.NewDatabase("keys", sqldb.DatabaseConfig{
+	Migrations: "./migrations",
+})
+
+// ---------------------------------------------------------------------------
+// Key type
+// ---------------------------------------------------------------------------
+
+// KeyType distinguishes live (production) keys from test (sandbox) keys.
+type KeyType string
+
+const (
+	KeyTypeLive KeyType = "live"
+	KeyTypeTest KeyType = "test"
+)
+
+// prefix returns the string prefix for this key type.
+func (kt KeyType) prefix() string {
+	switch kt {
+	case KeyTypeTest:
+		return "sk_test_"
+	default:
+		return "sk_live_"
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Key generation
+// ---------------------------------------------------------------------------
+
+// keyBodyLen is the number of random bytes used to build the key body.
+// base64.RawURLEncoding produces 4 chars per 3 bytes, so 54 bytes → 72 chars.
+// prefix (8) + body (72) = 80 characters total.
+const keyBodyLen = 54
+
+// generateKey creates a new 80-character API key of the requested type.
+// Only the SHA-256 hash and a display preview are stored — the full key is
+// returned once to the caller and cannot be recovered by the backend.
+func generateKey(kt KeyType) (fullKey, keyHash, preview string, err error) {
+	buf := make([]byte, keyBodyLen)
+	if _, err = rand.Read(buf); err != nil {
+		return "", "", "", err
+	}
+
+	body := base64.RawURLEncoding.EncodeToString(buf) // 72 URL-safe chars
+	prefix := kt.prefix()
+	fullKey = prefix + body // e.g. "sk_live_<72 chars>" = 80 chars
+
+	sum := sha256.Sum256([]byte(fullKey))
+	keyHash = hex.EncodeToString(sum[:])
+
+	// Preview: prefix + first 6 body chars + "…"
+	preview = prefix + body[:6] + "…"
+	return fullKey, keyHash, preview, nil
+}
+
+// hashKey returns the SHA-256 hex hash of a raw key for DB lookups.
+func hashKey(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])
+}
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-// APIKey represents a single API key record.
+// APIKey represents a single API key record returned to the dashboard.
+// The full key value is never included — only the preview hint.
 type APIKey struct {
-	ID          string     `json:"id"`
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	KeyPreview  string     `json:"key_preview"` // first 11 chars + "..."
-	IsActive    bool       `json:"is_active"`
-	LastUsedAt  *time.Time `json:"last_used_at,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	KeyType     KeyType   `json:"key_type"`
+	KeyPreview  string    `json:"key_preview"` // e.g. "sk_live_Ab3xY9…"
+	IsActive    bool      `json:"is_active"`
+	LastUsedAt  *utc.Time `json:"last_used_at,omitempty"`
+	CreatedAt   utc.Time  `json:"created_at"`
 }
 
 // ---------------------------------------------------------------------------
@@ -36,16 +101,19 @@ type APIKey struct {
 // ---------------------------------------------------------------------------
 
 type CreateKeyRequest struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	KeyType     KeyType `json:"key_type"` // "live" (default) or "test"
 }
 
 type CreateKeyResponse struct {
-	Key    string  `json:"key"` // Full key — shown ONCE
+	// Key is the full 80-character API key. It is shown exactly once — the
+	// backend stores only the hash; this value cannot be recovered later.
+	Key    string  `json:"key"`
 	APIKey *APIKey `json:"api_key"`
 }
 
-// Create generates a new API key for the authenticated user.
+// Create generates a new API key for the authenticated dashboard user.
 //
 //encore:api auth method=POST path=/keys
 func Create(ctx context.Context, req *CreateKeyRequest) (*CreateKeyResponse, error) {
@@ -56,22 +124,30 @@ func Create(ctx context.Context, req *CreateKeyRequest) (*CreateKeyResponse, err
 		return nil, eb.Code(errs.InvalidArgument).Msg("key name is required").Err()
 	}
 
-	// Generate key: "sk_" prefix + 48 random hex bytes
-	rawBytes := make([]byte, 48)
-	if _, err := rand.Read(rawBytes); err != nil {
+	kt := req.KeyType
+	if kt != KeyTypeLive && kt != KeyTypeTest {
+		kt = KeyTypeLive // default
+	}
+
+	fullKey, keyHash, preview, err := generateKey(kt)
+	if err != nil {
 		return nil, eb.Code(errs.Internal).Msg("failed to generate key").Err()
 	}
-	fullKey := "sk_" + hex.EncodeToString(rawBytes)
 
-	var keyID string
-	var createdAt time.Time
-	err := db.QueryRow(ctx, `
-		INSERT INTO api_keys (user_id, key, name, description, is_active)
-		VALUES ($1, $2, $3, $4, true)
-		RETURNING id, created_at
-	`, uid, fullKey, req.Name, req.Description).Scan(&keyID, &createdAt)
+	// Use publicid for a short, URL-safe record ID.
+	keyID, err := publicid.New()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create API key: %w", err)
+		return nil, eb.Code(errs.Internal).Msg("failed to generate key ID").Err()
+	}
+
+	var createdAt utc.Time
+	err = db.QueryRow(ctx, `
+		INSERT INTO api_keys (id, user_id, key_hash, key_preview, key_type, name, description, is_active)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, true)
+		RETURNING created_at
+	`, keyID, uid, keyHash, preview, string(kt), req.Name, req.Description).Scan(&createdAt)
+	if err != nil {
+		return nil, errs.B().Cause(err).Code(errs.Internal).Msg("failed to create API key").Err()
 	}
 
 	return &CreateKeyResponse{
@@ -80,7 +156,8 @@ func Create(ctx context.Context, req *CreateKeyRequest) (*CreateKeyResponse, err
 			ID:          keyID,
 			Name:        req.Name,
 			Description: req.Description,
-			KeyPreview:  fullKey[:11] + "...",
+			KeyType:     kt,
+			KeyPreview:  preview,
 			IsActive:    true,
 			CreatedAt:   createdAt,
 		},
@@ -95,42 +172,45 @@ type ListKeysResponse struct {
 	Keys []*APIKey `json:"keys"`
 }
 
-// List returns all API keys for the authenticated user.
+// List returns all API keys for the authenticated dashboard user.
 //
 //encore:api auth method=GET path=/keys
 func List(ctx context.Context) (*ListKeysResponse, error) {
 	uid, _ := auth.UserID()
 
 	rows, err := db.Query(ctx, `
-		SELECT id, name, description, key, is_active, last_used_at, created_at
+		SELECT id, name, description, key_type, key_preview, is_active, last_used_at, created_at
 		FROM api_keys
 		WHERE user_id = $1
 		ORDER BY created_at DESC
 	`, uid)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list API keys: %w", err)
+		return nil, errs.B().Cause(err).Code(errs.Internal).Msg("failed to list API keys").Err()
 	}
 	defer rows.Close()
 
-	var keys []*APIKey
+	var apiKeys []*APIKey
 	for rows.Next() {
 		var k APIKey
-		var fullKey string
-		if err := rows.Scan(&k.ID, &k.Name, &k.Description, &fullKey, &k.IsActive, &k.LastUsedAt, &k.CreatedAt); err != nil {
-			return nil, fmt.Errorf("failed to scan key: %w", err)
+		var kt string
+		if err := rows.Scan(
+			&k.ID, &k.Name, &k.Description, &kt,
+			&k.KeyPreview, &k.IsActive, &k.LastUsedAt, &k.CreatedAt,
+		); err != nil {
+			return nil, errs.B().Cause(err).Code(errs.Internal).Msg("failed to scan key").Err()
 		}
-		k.KeyPreview = fullKey[:11] + "..."
-		keys = append(keys, &k)
+		k.KeyType = KeyType(kt)
+		apiKeys = append(apiKeys, &k)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("row iteration error: %w", err)
+		return nil, errs.B().Cause(err).Code(errs.Internal).Msg("row iteration error").Err()
 	}
 
-	if keys == nil {
-		keys = []*APIKey{}
+	if apiKeys == nil {
+		apiKeys = []*APIKey{}
 	}
 
-	return &ListKeysResponse{Keys: keys}, nil
+	return &ListKeysResponse{Keys: apiKeys}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -141,7 +221,7 @@ type RevokeKeyResponse struct {
 	Message string `json:"message"`
 }
 
-// Revoke deactivates an API key. The key stays in the DB for audit purposes.
+// Revoke deactivates an API key (soft delete — kept for audit).
 //
 //encore:api auth method=DELETE path=/keys/:id
 func Revoke(ctx context.Context, id string) (*RevokeKeyResponse, error) {
@@ -153,76 +233,92 @@ func Revoke(ctx context.Context, id string) (*RevokeKeyResponse, error) {
 		WHERE id = $1 AND user_id = $2
 	`, id, uid)
 	if err != nil {
-		return nil, fmt.Errorf("failed to revoke key: %w", err)
+		return nil, errs.B().Cause(err).Code(errs.Internal).Msg("failed to revoke key").Err()
 	}
-
 	if res.RowsAffected() == 0 {
 		return nil, eb.Code(errs.NotFound).Msg("API key not found").Err()
 	}
 
-	return &RevokeKeyResponse{Message: "API key revoked successfully"}, nil
+	return &RevokeKeyResponse{Message: "API key revoked"}, nil
 }
 
 // ---------------------------------------------------------------------------
-// Roll (regenerate) an API key
+// Roll (regenerate) an API Key
 // ---------------------------------------------------------------------------
 
 type RollKeyResponse struct {
-	Key    string  `json:"key"` // New full key — shown ONCE
+	// Key is the new 80-character API key, shown once. The old key is
+	// immediately invalidated — there is no overlap window.
+	Key    string  `json:"key"`
 	APIKey *APIKey `json:"api_key"`
 }
 
-// Roll replaces an existing API key with a new one (same name/description).
+// Roll replaces an existing key with a freshly generated one of the same type.
+// The old key hash is overwritten instantly — the old key stops working
+// immediately and cannot be recovered.
 //
 //encore:api auth method=POST path=/keys/:id/roll
 func Roll(ctx context.Context, id string) (*RollKeyResponse, error) {
 	eb := errs.B()
 	uid, _ := auth.UserID()
 
-	rawBytes := make([]byte, 48)
-	if _, err := rand.Read(rawBytes); err != nil {
+	// Fetch existing key type first.
+	var ktStr string
+	err := db.QueryRow(ctx, `
+		SELECT key_type FROM api_keys WHERE id = $1 AND user_id = $2
+	`, id, uid).Scan(&ktStr)
+	if errors.Is(err, sqldb.ErrNoRows) {
+		return nil, eb.Code(errs.NotFound).Msg("API key not found").Err()
+	}
+	if err != nil {
+		return nil, errs.B().Cause(err).Code(errs.Internal).Msg("failed to fetch key type").Err()
+	}
+
+	kt := KeyType(ktStr)
+	newKey, newHash, newPreview, err := generateKey(kt)
+	if err != nil {
 		return nil, eb.Code(errs.Internal).Msg("failed to generate key").Err()
 	}
-	newKey := "sk_" + hex.EncodeToString(rawBytes)
 
 	var k APIKey
-	var fullKey string
-	err := db.QueryRow(ctx, `
+	err = db.QueryRow(ctx, `
 		UPDATE api_keys
-		SET key = $1, is_active = true, last_used_at = NULL
-		WHERE id = $2 AND user_id = $3
-		RETURNING id, name, description, key, is_active, last_used_at, created_at
-	`, newKey, id, uid).Scan(
-		&k.ID, &k.Name, &k.Description, &fullKey, &k.IsActive, &k.LastUsedAt, &k.CreatedAt,
+		SET key_hash = $1, key_preview = $2, is_active = true, last_used_at = NULL
+		WHERE id = $3 AND user_id = $4
+		RETURNING id, name, description, key_type, key_preview, is_active, last_used_at, created_at
+	`, newHash, newPreview, id, uid).Scan(
+		&k.ID, &k.Name, &k.Description, &ktStr,
+		&k.KeyPreview, &k.IsActive, &k.LastUsedAt, &k.CreatedAt,
 	)
 	if errors.Is(err, sqldb.ErrNoRows) {
 		return nil, eb.Code(errs.NotFound).Msg("API key not found").Err()
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to roll key: %w", err)
+		return nil, errs.B().Cause(err).Code(errs.Internal).Msg("failed to roll key").Err()
 	}
 
-	k.KeyPreview = fullKey[:11] + "..."
-
-	return &RollKeyResponse{Key: fullKey, APIKey: &k}, nil
+	k.KeyType = KeyType(ktStr)
+	return &RollKeyResponse{Key: newKey, APIKey: &k}, nil
 }
 
 // ---------------------------------------------------------------------------
-// ValidateKey — internal helper for usage tracking
+// ValidateKey — private, called by other services to authenticate API callers
 // ---------------------------------------------------------------------------
 
-// KeyInfo is returned when a key is successfully validated.
+// KeyInfo is returned to internal callers that validate an API key.
 type KeyInfo struct {
-	KeyID  string `json:"key_id"`
-	UserID string `json:"user_id"`
+	KeyID   string  `json:"key_id"`
+	UserID  string  `json:"user_id"`
+	KeyType KeyType `json:"key_type"`
 }
 
 type ValidateKeyRequest struct {
 	Key string `json:"key"`
 }
 
-// ValidateKey looks up an active API key and updates last_used_at.
-// Private — called internally by the usage service.
+// ValidateKey looks up an active API key by its hash, records last_used_at,
+// and returns the resolved key_id, user_id, and key_type.
+// This is a private endpoint — callable only by services within this app.
 //
 //encore:api private method=POST path=/internal/keys/validate
 func ValidateKey(ctx context.Context, req *ValidateKeyRequest) (*KeyInfo, error) {
@@ -232,17 +328,22 @@ func ValidateKey(ctx context.Context, req *ValidateKeyRequest) (*KeyInfo, error)
 		return nil, eb.Code(errs.InvalidArgument).Msg("key is required").Err()
 	}
 
+	h := hashKey(req.Key)
+
 	var info KeyInfo
+	var kt string
 	err := db.QueryRow(ctx, `
-		SELECT id, user_id FROM api_keys
-		WHERE key = $1 AND is_active = true
-	`, req.Key).Scan(&info.KeyID, &info.UserID)
+		SELECT id, user_id, key_type FROM api_keys
+		WHERE key_hash = $1 AND is_active = true
+	`, h).Scan(&info.KeyID, &info.UserID, &kt)
 	if errors.Is(err, sqldb.ErrNoRows) {
 		return nil, eb.Code(errs.Unauthenticated).Msg("invalid or inactive API key").Err()
 	}
 	if err != nil {
-		return nil, fmt.Errorf("key lookup failed: %w", err)
+		return nil, errs.B().Cause(err).Code(errs.Internal).Msg("key lookup failed").Err()
 	}
+
+	info.KeyType = KeyType(kt)
 
 	_, _ = db.Exec(ctx, `UPDATE api_keys SET last_used_at = NOW() WHERE id = $1`, info.KeyID)
 
