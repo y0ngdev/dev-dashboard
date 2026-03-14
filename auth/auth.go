@@ -18,6 +18,7 @@ import (
 	"encore.app/mailer"
 	"encore.dev/beta/auth"
 	"encore.dev/beta/errs"
+	"encore.dev/rlog"
 	"encore.dev/storage/sqldb"
 	"golang.org/x/crypto/argon2"
 )
@@ -138,14 +139,14 @@ func Register(ctx context.Context, req *RegisterRequest) (*RegisterResponse, err
 		RETURNING id
 	`, req.Name, req.Email, hashedPassword).Scan(&userID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create user: %w", err)
+		return nil, eb.Cause(err).Code(errs.Internal).Msg("failed to create user").Err()
 	}
 
 	// Generate and store verification token
 	token, expiresAt, err := createAndStoreVerificationToken(ctx, userID, req.Email)
 	if err != nil {
 		// Non-fatal: user created, email sending failed
-		fmt.Printf("failed to create verification token: %v\n", err)
+		rlog.Warn("failed to create verification token", "user_id", userID, "err", err)
 	} else {
 		signedToken := signToken(token, req.Email, expiresAt)
 		verificationURL := fmt.Sprintf("https://yourdomain.com/auth/verify/email?token=%s", signedToken)
@@ -154,7 +155,7 @@ func Register(ctx context.Context, req *RegisterRequest) (*RegisterResponse, err
 			TemplateName: "verification",
 			Data:         map[string]string{"name": req.Name, "url": verificationURL},
 		}); err != nil {
-			fmt.Printf("failed to send verification email: %v\n", err)
+			rlog.Warn("failed to send verification email", "user_id", userID, "err", err)
 		}
 	}
 
@@ -200,7 +201,7 @@ func Login(ctx context.Context, req *LoginRequest) (*LoginResponse, error) {
 		return nil, eb.Code(errs.Unauthenticated).Msg("invalid email or password").Err()
 	}
 	if err != nil {
-		return nil, fmt.Errorf("login failed: %w", err)
+		return nil, eb.Cause(err).Code(errs.Internal).Msg("login failed").Err()
 	}
 
 	match, err := compareHash(req.Password, passwordHash)
@@ -215,7 +216,7 @@ func Login(ctx context.Context, req *LoginRequest) (*LoginResponse, error) {
 	// Generate secure session token
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
-		return nil, fmt.Errorf("failed to generate session token: %w", err)
+		return nil, eb.Cause(err).Code(errs.Internal).Msg("failed to generate session token").Err()
 	}
 	sessionToken := hex.EncodeToString(tokenBytes)
 	expiresAt := time.Now().Add(30 * 24 * time.Hour)
@@ -225,7 +226,7 @@ func Login(ctx context.Context, req *LoginRequest) (*LoginResponse, error) {
 		VALUES ($1, $2, $3)
 	`, u.ID, sessionToken, expiresAt)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create session: %w", err)
+		return nil, eb.Cause(err).Code(errs.Internal).Msg("failed to create session").Err()
 	}
 
 	return &LoginResponse{
@@ -248,7 +249,7 @@ func Logout(ctx context.Context) (*LogoutResponse, error) {
 
 	_, err := db.Exec(ctx, `DELETE FROM sessions WHERE user_id = $1`, uid)
 	if err != nil {
-		return nil, fmt.Errorf("failed to invalidate sessions: %w", err)
+		return nil, errs.B().Cause(err).Code(errs.Internal).Msg("failed to invalidate sessions").Err()
 	}
 
 	return &LogoutResponse{Message: "Logged out successfully"}, nil
@@ -292,12 +293,12 @@ func VerifyEmail(ctx context.Context, params *VerifyEmailParams) (*VerifyEmailRe
 		return nil, eb.Code(errs.NotFound).Msg("invalid or expired verification link").Err()
 	}
 	if err != nil {
-		return nil, fmt.Errorf("verification lookup failed: %w", err)
+		return nil, eb.Cause(err).Code(errs.Internal).Msg("verification lookup failed").Err()
 	}
 
 	_, err = db.Exec(ctx, `UPDATE users SET email_verified = true, updated_at = NOW() WHERE id = $1`, userID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to verify email: %w", err)
+		return nil, eb.Cause(err).Code(errs.Internal).Msg("failed to verify email").Err()
 	}
 
 	_, _ = db.Exec(ctx, `DELETE FROM email_verifications WHERE token = $1`, rawToken)
@@ -348,7 +349,7 @@ func ResendVerificationEmail(ctx context.Context, params *ResendVerificationEmai
 		}, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("lookup failed: %w", err)
+		return nil, eb.Cause(err).Code(errs.Internal).Msg("lookup failed").Err()
 	}
 
 	if emailVerified {
@@ -360,7 +361,7 @@ func ResendVerificationEmail(ctx context.Context, params *ResendVerificationEmai
 
 	token, expiresAt, err := createAndStoreVerificationToken(ctx, userID, params.Email)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create verification token: %w", err)
+		return nil, eb.Cause(err).Code(errs.Internal).Msg("failed to create verification token").Err()
 	}
 
 	signedToken := signToken(token, params.Email, expiresAt)
@@ -370,7 +371,7 @@ func ResendVerificationEmail(ctx context.Context, params *ResendVerificationEmai
 		TemplateName: "verification",
 		Data:         map[string]string{"name": name, "url": verificationURL},
 	}); err != nil {
-		return nil, fmt.Errorf("failed to send verification email: %w", err)
+		return nil, eb.Cause(err).Code(errs.Internal).Msg("failed to send verification email").Err()
 	}
 
 	return &ResendVerificationEmailResponse{
@@ -410,7 +411,7 @@ func ChangePassword(ctx context.Context, req *ChangePasswordRequest) error {
 	var storedHash string
 	err := db.QueryRow(ctx, `SELECT password_hash FROM users WHERE id = $1`, uid).Scan(&storedHash)
 	if err != nil {
-		return fmt.Errorf("failed to fetch user: %w", err)
+		return eb.Cause(err).Code(errs.Internal).Msg("failed to fetch user").Err()
 	}
 
 	match, err := compareHash(req.OldPassword, storedHash)
@@ -433,7 +434,7 @@ func ChangePassword(ctx context.Context, req *ChangePasswordRequest) error {
 		UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2
 	`, newHash, uid)
 	if err != nil {
-		return fmt.Errorf("failed to update password: %w", err)
+		return eb.Cause(err).Code(errs.Internal).Msg("failed to update password").Err()
 	}
 
 	// Invalidate all sessions to force re-login
@@ -461,7 +462,7 @@ func Me(ctx context.Context) (*User, error) {
 		return nil, errs.B().Code(errs.NotFound).Msg("user not found").Err()
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch user: %w", err)
+		return nil, errs.B().Cause(err).Code(errs.Internal).Msg("failed to fetch user").Err()
 	}
 
 	return &u, nil
@@ -543,7 +544,7 @@ var defaultArgon2Config = &argon2Config{
 func hashPassword(password string) (string, error) {
 	salt := make([]byte, 24)
 	if _, err := rand.Read(salt); err != nil {
-		return "", fmt.Errorf("salt generation failed: %w", err)
+		return "", errors.New("salt generation failed")
 	}
 
 	cfg := defaultArgon2Config
@@ -581,7 +582,7 @@ func parseArgon2Hash(encoded string) (*argon2Config, []byte, []byte, error) {
 
 	var version int
 	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil {
-		return nil, nil, nil, fmt.Errorf("invalid version: %w", err)
+		return nil, nil, nil, errors.New("invalid hash version")
 	}
 	if version != argon2.Version {
 		return nil, nil, nil, fmt.Errorf("unsupported argon2 version: %d", version)
@@ -589,17 +590,17 @@ func parseArgon2Hash(encoded string) (*argon2Config, []byte, []byte, error) {
 
 	cfg := &argon2Config{}
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &cfg.MemoryCost, &cfg.TimeCost, &cfg.Threads); err != nil {
-		return nil, nil, nil, fmt.Errorf("invalid params: %w", err)
+		return nil, nil, nil, errors.New("invalid hash params")
 	}
 
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("salt decode failed: %w", err)
+		return nil, nil, nil, errors.New("invalid hash salt encoding")
 	}
 
 	hash, err := base64.RawStdEncoding.DecodeString(parts[5])
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("hash decode failed: %w", err)
+		return nil, nil, nil, errors.New("invalid hash encoding")
 	}
 
 	cfg.KeyLength = uint32(len(hash))
@@ -613,7 +614,7 @@ func parseArgon2Hash(encoded string) (*argon2Config, []byte, []byte, error) {
 func createAndStoreVerificationToken(ctx context.Context, userID, email string) (string, time.Time, error) {
 	rawBytes := make([]byte, 32)
 	if _, err := rand.Read(rawBytes); err != nil {
-		return "", time.Time{}, fmt.Errorf("token generation failed: %w", err)
+		return "", time.Time{}, errors.New("token generation failed")
 	}
 	token := hex.EncodeToString(rawBytes)
 	expiresAt := time.Now().Add(24 * time.Hour)
@@ -623,7 +624,7 @@ func createAndStoreVerificationToken(ctx context.Context, userID, email string) 
 		VALUES ($1, $2, $3)
 	`, userID, token, expiresAt)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("failed to store token: %w", err)
+		return "", time.Time{}, errors.New("failed to store token")
 	}
 
 	return token, expiresAt, nil

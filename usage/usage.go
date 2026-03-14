@@ -2,7 +2,7 @@ package usage
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"time"
 
 	"encore.dev/beta/auth"
@@ -58,7 +58,7 @@ func Record(ctx context.Context, req *RecordRequest) error {
 		VALUES ($1, $2, $3, $4, $5, $6)
 	`, req.APIKeyID, req.UserID, req.Endpoint, req.Method, req.StatusCode, req.DurationMs)
 	if err != nil {
-		return fmt.Errorf("failed to record usage: %w", err)
+		return errs.B().Cause(err).Code(errs.Internal).Msg("failed to record usage").Err()
 	}
 
 	return nil
@@ -101,7 +101,7 @@ func List(ctx context.Context, p *ListParams) (*ListResponse, error) {
 	}
 
 	if err := db.QueryRow(ctx, countQuery, countArgs...).Scan(&total); err != nil {
-		return nil, fmt.Errorf("count failed: %w", err)
+		return nil, errs.B().Cause(err).Code(errs.Internal).Msg("count failed").Err()
 	}
 
 	// Fetch page
@@ -123,7 +123,7 @@ func List(ctx context.Context, p *ListParams) (*ListResponse, error) {
 
 	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query failed: %w", err)
+		return nil, errs.B().Cause(err).Code(errs.Internal).Msg("query failed").Err()
 	}
 	defer rows.Close()
 
@@ -131,12 +131,12 @@ func List(ctx context.Context, p *ListParams) (*ListResponse, error) {
 	for rows.Next() {
 		var e UsageEvent
 		if err := rows.Scan(&e.ID, &e.APIKeyID, &e.UserID, &e.Endpoint, &e.Method, &e.StatusCode, &e.DurationMs, &e.RequestedAt); err != nil {
-			return nil, fmt.Errorf("scan failed: %w", err)
+			return nil, errs.B().Cause(err).Code(errs.Internal).Msg("scan failed").Err()
 		}
 		events = append(events, &e)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("row error: %w", err)
+		return nil, errs.B().Cause(err).Code(errs.Internal).Msg("row error").Err()
 	}
 
 	if events == nil {
@@ -156,11 +156,11 @@ type SummaryParams struct {
 }
 
 type EndpointStat struct {
-	Endpoint   string  `json:"endpoint"`
-	Method     string  `json:"method"`
-	Count      int     `json:"count"`
+	Endpoint    string  `json:"endpoint"`
+	Method      string  `json:"method"`
+	Count       int     `json:"count"`
 	SuccessRate float64 `json:"success_rate"`
-	AvgMs      *int    `json:"avg_ms,omitempty"`
+	AvgMs       *int    `json:"avg_ms,omitempty"`
 }
 
 type DailyStat struct {
@@ -171,13 +171,13 @@ type DailyStat struct {
 }
 
 type SummaryResponse struct {
-	Period           string          `json:"period"`
-	TotalRequests    int             `json:"total_requests"`
-	SuccessRequests  int             `json:"success_requests"`
-	ErrorRequests    int             `json:"error_requests"`
-	AvgDurationMs    *int            `json:"avg_duration_ms,omitempty"`
-	TopEndpoints     []*EndpointStat `json:"top_endpoints"`
-	Daily            []*DailyStat    `json:"daily"`
+	Period          string          `json:"period"`
+	TotalRequests   int             `json:"total_requests"`
+	SuccessRequests int             `json:"success_requests"`
+	ErrorRequests   int             `json:"error_requests"`
+	AvgDurationMs   *int            `json:"avg_duration_ms,omitempty"`
+	TopEndpoints    []*EndpointStat `json:"top_endpoints"`
+	Daily           []*DailyStat    `json:"daily"`
 }
 
 // Summary returns aggregated usage metrics for the dashboard.
@@ -206,7 +206,7 @@ func Summary(ctx context.Context, p *SummaryParams) (*SummaryResponse, error) {
 		WHERE user_id = $1 AND requested_at >= $2
 	`, uid, since).Scan(&total, &success, &errCount, &avgMs)
 	if err != nil {
-		return nil, fmt.Errorf("summary query failed: %w", err)
+		return nil, errs.B().Cause(err).Code(errs.Internal).Msg("summary query failed").Err()
 	}
 
 	// Top 10 endpoints
@@ -224,7 +224,7 @@ func Summary(ctx context.Context, p *SummaryParams) (*SummaryResponse, error) {
 		LIMIT 10
 	`, uid, since)
 	if err != nil {
-		return nil, fmt.Errorf("endpoint stats query failed: %w", err)
+		return nil, errs.B().Cause(err).Code(errs.Internal).Msg("endpoint stats query failed").Err()
 	}
 	defer endpointRows.Close()
 
@@ -232,12 +232,12 @@ func Summary(ctx context.Context, p *SummaryParams) (*SummaryResponse, error) {
 	for endpointRows.Next() {
 		var s EndpointStat
 		if err := endpointRows.Scan(&s.Endpoint, &s.Method, &s.Count, &s.SuccessRate, &s.AvgMs); err != nil {
-			return nil, fmt.Errorf("endpoint stat scan failed: %w", err)
+			return nil, errs.B().Cause(err).Code(errs.Internal).Msg("endpoint stat scan failed").Err()
 		}
 		topEndpoints = append(topEndpoints, &s)
 	}
 	if err := endpointRows.Err(); err != nil {
-		return nil, fmt.Errorf("endpoint rows error: %w", err)
+		return nil, errs.B().Cause(err).Code(errs.Internal).Msg("endpoint rows error").Err()
 	}
 
 	// Daily breakdown
@@ -253,7 +253,7 @@ func Summary(ctx context.Context, p *SummaryParams) (*SummaryResponse, error) {
 		ORDER BY date ASC
 	`, uid, since)
 	if err != nil {
-		return nil, fmt.Errorf("daily stats query failed: %w", err)
+		return nil, errs.B().Cause(err).Code(errs.Internal).Msg("daily stats query failed").Err()
 	}
 	defer dailyRows.Close()
 
@@ -261,12 +261,12 @@ func Summary(ctx context.Context, p *SummaryParams) (*SummaryResponse, error) {
 	for dailyRows.Next() {
 		var d DailyStat
 		if err := dailyRows.Scan(&d.Date, &d.Total, &d.Success, &d.Errors); err != nil {
-			return nil, fmt.Errorf("daily stat scan failed: %w", err)
+			return nil, errs.B().Cause(err).Code(errs.Internal).Msg("daily stat scan failed").Err()
 		}
 		daily = append(daily, &d)
 	}
 	if err := dailyRows.Err(); err != nil {
-		return nil, fmt.Errorf("daily rows error: %w", err)
+		return nil, errs.B().Cause(err).Code(errs.Internal).Msg("daily rows error").Err()
 	}
 
 	if topEndpoints == nil {
@@ -300,6 +300,6 @@ func parsePeriodDays(period string) (int, error) {
 	case "90d":
 		return 90, nil
 	default:
-		return 0, fmt.Errorf("invalid period %q — use 7d, 30d, or 90d", period)
+		return 0, errors.New("invalid period — use 7d, 30d, or 90d")
 	}
 }

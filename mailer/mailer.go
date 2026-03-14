@@ -2,8 +2,12 @@ package mailer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/smtp"
+
+	"encore.dev/beta/errs"
+	"encore.dev/rlog"
 )
 
 var secrets struct {
@@ -29,13 +33,13 @@ type EmailRequest struct {
 //encore:api private
 func Send(_ context.Context, req *EmailRequest) error {
 	if req.To == "" {
-		return fmt.Errorf("recipient email is required")
+		return errs.B().Code(errs.InvalidArgument).Msg("recipient email is required").Err()
 	}
 	if req.Subject == "" {
-		return fmt.Errorf("email subject is required")
+		return errs.B().Code(errs.InvalidArgument).Msg("email subject is required").Err()
 	}
 	if req.HTML == "" && req.Text == "" {
-		return fmt.Errorf("email must have either HTML or text content")
+		return errs.B().Code(errs.InvalidArgument).Msg("email must have either HTML or text content").Err()
 	}
 
 	return sendViaSMTP(req)
@@ -54,7 +58,7 @@ type SendTemplateRequest struct {
 func SendTemplate(ctx context.Context, req *SendTemplateRequest) error {
 	tmpl, err := getTemplate(req.TemplateName, req.Data)
 	if err != nil {
-		return fmt.Errorf("template %q not found: %w", req.TemplateName, err)
+		return errs.B().Cause(err).Code(errs.InvalidArgument).Msgf("template %q not found", req.TemplateName).Err()
 	}
 
 	return Send(ctx, &EmailRequest{
@@ -96,7 +100,7 @@ func getTemplate(name string, data map[string]string) (*emailTemplate, error) {
 			Text:    buildWelcomeText(data),
 		}, nil
 	default:
-		return nil, fmt.Errorf("unknown template: %s", name)
+		return nil, errors.New("unknown template")
 	}
 }
 
@@ -231,9 +235,9 @@ func sendViaSMTP(req *EmailRequest) error {
 
 	smtpAuth := smtp.PlainAuth("", secrets.SMTPUsername, secrets.SMTPPassword, secrets.SMTPHost)
 	if err := smtp.SendMail(addr, smtpAuth, secrets.FromEmail, []string{req.To}, []byte(message)); err != nil {
-		return fmt.Errorf("SMTP send failed: %w", err)
+		return errs.B().Cause(err).Code(errs.Internal).Msg("SMTP send failed").Err()
 	}
 
-	fmt.Printf("email sent to %s\n", req.To)
+	rlog.Info("email sent", "to", req.To, "subject", req.Subject)
 	return nil
 }
