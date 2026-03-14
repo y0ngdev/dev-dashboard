@@ -14,18 +14,13 @@ import (
 	"strings"
 	"time"
 	"unicode"
-	
-	"encore.app/mailer"
-	"encore.dev/beta/errs"
-	"golang.org/x/crypto/argon2"
-	
-	"encore.dev/storage/sqldb"
-	//"golang.org/x/crypto/argon2"
-)
 
-//var db = sqldb.NewDatabase("user", sqldb.DatabaseConfig{
-//	Migrations: "./migrations",
-//})
+	"encore.app/mailer"
+	"encore.dev/beta/auth"
+	"encore.dev/beta/errs"
+	"encore.dev/storage/sqldb"
+	"golang.org/x/crypto/argon2"
+)
 
 var db = sqldb.NewDatabase("user", sqldb.DatabaseConfig{
 	Migrations: "./migrations",
@@ -35,13 +30,61 @@ var secrets struct {
 	SigningSecret string
 }
 
-type User struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	Email     string `json:"email"`
-	Password  string `json:"-"`
-	CreatedAt int64  `json:"created"`
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+// UserData is the custom auth data attached to every authenticated request.
+type UserData struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Email string `json:"email"`
 }
+
+// User is the full user record returned in responses.
+type User struct {
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	Email         string    `json:"email"`
+	EmailVerified bool      `json:"email_verified"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+// ---------------------------------------------------------------------------
+// Auth Handler
+// ---------------------------------------------------------------------------
+
+// AuthHandler validates a Bearer session token and returns the user's UID + data.
+//
+//encore:authhandler
+func AuthHandler(ctx context.Context, token string) (auth.UID, *UserData, error) {
+	eb := errs.B().Code(errs.Unauthenticated)
+
+	if token == "" {
+		return "", nil, eb.Msg("missing token").Err()
+	}
+
+	var userID, name, email string
+	err := db.QueryRow(ctx, `
+		SELECT u.id, u.name, u.email
+		FROM sessions s
+		JOIN users u ON s.user_id = u.id
+		WHERE s.token = $1 AND s.expires_at > NOW()
+	`, token).Scan(&userID, &name, &email)
+	if errors.Is(err, sqldb.ErrNoRows) {
+		return "", nil, eb.Msg("invalid or expired session").Err()
+	}
+	if err != nil {
+		return "", nil, eb.Msg("internal error").Err()
+	}
+
+	return auth.UID(userID), &UserData{ID: userID, Name: name, Email: email}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Register
+// ---------------------------------------------------------------------------
+
 type RegisterRequest struct {
 	Name            string `json:"name"`
 	Email           string `json:"email"`
@@ -50,322 +93,385 @@ type RegisterRequest struct {
 }
 
 type RegisterResponse struct {
-	Message string
-	UserID  int64
+	Message string `json:"message"`
+	UserID  string `json:"user_id"`
 }
 
+// Register creates a new user account and sends a verification email.
+//
 //encore:api public method=POST path=/auth/register
 func Register(ctx context.Context, req *RegisterRequest) (*RegisterResponse, error) {
-	
+	eb := errs.B()
+
 	if req.Name == "" || req.Email == "" || req.Password == "" || req.ConfirmPassword == "" {
-		return nil, &errs.Error{
-			Code:    errs.InvalidArgument,
-			Message: "missing required fields",
-		}
+		return nil, eb.Code(errs.InvalidArgument).Msg("all fields are required").Err()
 	}
-	
-	// Check if the email follows the valid definitions
-	emailRegex := `^[a-zA-Z0-9.!#$%&'*+/=?^_` + "`" + `{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`
-	
-	re := regexp.MustCompile(emailRegex)
-	
-	if !re.MatchString(req.Email) {
-		return nil, errs.B().Code(errs.InvalidArgument).Msg("invalid email").Err()
+
+	if !isValidEmail(req.Email) {
+		return nil, eb.Code(errs.InvalidArgument).Msg("invalid email address").Err()
 	}
-	
-	// Check if user exists
-	//var exists bool
-	//_ = db.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)", req.Email).Scan(&exists)
-	//if exists {
-	//	return nil, &errs.Error{
-	//		Code:    errs.AlreadyExists,
-	//		Message: "user already exists",
-	//	}
-	//}
-	
-	// Check if both password matches and if it fulfils
-	if err := ValidatePassword(req.Password, defaultRules); err != nil {
-		return nil, &errs.Error{
-			Code:    errs.InvalidArgument,
-			Message: err.Error(),
-		}
+
+	if err := validatePassword(req.Password, defaultRules); err != nil {
+		return nil, eb.Code(errs.InvalidArgument).Msg(err.Error()).Err()
 	}
-	
-	// Validate password matches
-	if err := ValidatePasswordMatch(req.Password, req.ConfirmPassword); err != nil {
-		return nil, &errs.Error{
-			Code:    errs.InvalidArgument,
-			Message: err.Error(),
-		}
+
+	if req.Password != req.ConfirmPassword {
+		return nil, eb.Code(errs.InvalidArgument).Msg("passwords do not match").Err()
 	}
-	
-	// Hash password
-	_, err := hashPassword(req.Password)
+
+	// Check for duplicate email
+	var exists bool
+	_ = db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)`, req.Email).Scan(&exists)
+	if exists {
+		return nil, eb.Code(errs.AlreadyExists).Msg("an account with this email already exists").Err()
+	}
+
+	hashedPassword, err := hashPassword(req.Password)
 	if err != nil {
-		return nil, fmt.Errorf("failed to hash password: %w", err)
+		return nil, eb.Code(errs.Internal).Msg("failed to process password").Err()
 	}
-	
-	// Create user
-	//var user User
-	//err = db.QueryRow(ctx, `
-	//	INSERT INTO users (email, password, name, email_verified)
-	//	VALUES ($1, $2, $3, false)
-	//	RETURNING id, email, name, created_at
-	//`, req.Email, hashedPassword, req.Name).Scan(
-	//	&user.ID, &user.Email, &user.Name, &user.CreatedAt,
-	//)
-	//if err != nil {
-	//	return nil, fmt.Errorf("failed to create user: %w", err)
-	//}
-	
-	if _, err := sendVerificationEmailWithToken(ctx, req.Email, req.Name); err != nil {
-		//if token, err := sendVerificationEmailWithToken(ctx, req.Email, req.Name); err != nil {
-		// Log the error but don't fail registration
-		fmt.Printf("Failed to send verification email: %v\n", err)
+
+	var userID string
+	err = db.QueryRow(ctx, `
+		INSERT INTO users (name, email, password_hash, email_verified)
+		VALUES ($1, $2, $3, false)
+		RETURNING id
+	`, req.Name, req.Email, hashedPassword).Scan(&userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create user: %w", err)
 	}
-	// Store verification token
-	// _, err = db.Exec(ctx, `
-	//    INSERT INTO email_verifications (user_id, token, expires_at)
-	//    VALUES ($1, $2, $3)
-	// `, &user.ID, token, expiresAt)
-	//
-	// if err != nil {
-	//    return nil, fmt.Errorf("failed to store verification token: %w", err)
-	// }
-	
+
+	// Generate and store verification token
+	token, expiresAt, err := createAndStoreVerificationToken(ctx, userID, req.Email)
+	if err != nil {
+		// Non-fatal: user created, email sending failed
+		fmt.Printf("failed to create verification token: %v\n", err)
+	} else {
+		signedToken := signToken(token, req.Email, expiresAt)
+		verificationURL := fmt.Sprintf("https://yourdomain.com/auth/verify/email?token=%s", signedToken)
+		if err := mailer.SendTemplate(ctx, &mailer.SendTemplateRequest{
+			To:           req.Email,
+			TemplateName: "verification",
+			Data:         map[string]string{"name": req.Name, "url": verificationURL},
+		}); err != nil {
+			fmt.Printf("failed to send verification email: %v\n", err)
+		}
+	}
+
 	return &RegisterResponse{
-		Message: "User registered successfully. Please check your email to verify your account.",
-		UserID:  1, // Replace with actual userID
+		Message: "Account created. Please check your email to verify your account.",
+		UserID:  userID,
 	}, nil
 }
 
-// sendVerificationEmailWithToken generates a token and sends verification email
-func sendVerificationEmailWithToken(ctx context.Context, userEmail, name string) (string, error) {
-	// Generate email verification token
-	token, err := generateVerificationToken()
+// ---------------------------------------------------------------------------
+// Login / Logout
+// ---------------------------------------------------------------------------
+
+type LoginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+type LoginResponse struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+	User      *User     `json:"user"`
+}
+
+// Login authenticates a user and returns a session token.
+//
+//encore:api public method=POST path=/auth/login
+func Login(ctx context.Context, req *LoginRequest) (*LoginResponse, error) {
+	eb := errs.B()
+
+	if req.Email == "" || req.Password == "" {
+		return nil, eb.Code(errs.InvalidArgument).Msg("email and password are required").Err()
+	}
+
+	var u User
+	var passwordHash string
+	err := db.QueryRow(ctx, `
+		SELECT id, name, email, email_verified, password_hash, created_at
+		FROM users WHERE email = $1
+	`, req.Email).Scan(&u.ID, &u.Name, &u.Email, &u.EmailVerified, &passwordHash, &u.CreatedAt)
+	if errors.Is(err, sqldb.ErrNoRows) {
+		// Same error for missing user and wrong password (prevent user enumeration)
+		return nil, eb.Code(errs.Unauthenticated).Msg("invalid email or password").Err()
+	}
 	if err != nil {
-		return "", fmt.Errorf("failed to generate verification token: %w", err)
+		return nil, fmt.Errorf("login failed: %w", err)
 	}
-	
-	// Set token expiration (24 hours from now)
-	expiresAt := time.Now().Add(24 * time.Hour)
-	
-	// Create signed verification token
-	signedToken := signToken(token, userEmail, expiresAt)
-	
-	// Generate verification URL with signed token
-	verificationURL := fmt.Sprintf("https://yourdomain.com/auth/verify/email?token=%s", signedToken)
-	
-	// Send verification email using the mail service
-	return token, mailer.SendTemplate(ctx, &mailer.SendTemplateRequest{
-		To:           userEmail,
-		TemplateName: "verification",
-		Data: map[string]string{
-			"name": name,
-			"url":  verificationURL,
-		},
-	})
-}
 
-// generateVerificationToken creates a secure random token
-func generateVerificationToken() (string, error) {
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
+	match, err := compareHash(req.Password, passwordHash)
+	if err != nil || !match {
+		return nil, eb.Code(errs.Unauthenticated).Msg("invalid email or password").Err()
 	}
-	return hex.EncodeToString(bytes), nil
-}
 
-// signToken creates a signed token containing: token.email.expiry.signature
-func signToken(token, email string, expiresAt time.Time) string {
-	// Create payload: token.email.expiry
-	expiry := fmt.Sprintf("%d", expiresAt.Unix())
-	payload := fmt.Sprintf("%s.%s.%s", token, email, expiry)
-	
-	// Create HMAC signature
-	h := hmac.New(sha256.New, []byte(secrets.SigningSecret))
-	h.Write([]byte(payload))
-	signature := base64.URLEncoding.EncodeToString(h.Sum(nil))
-	
-	// Return signed token: payload.signature
-	return fmt.Sprintf("%s.%s", payload, signature)
-}
+	if !u.EmailVerified {
+		return nil, eb.Code(errs.FailedPrecondition).Msg("please verify your email before logging in").Err()
+	}
 
-// verifySignedToken verifies and extracts data from a signed token
-func verifySignedToken(signedToken string) (token, email string, expiresAt time.Time, err error) {
-	// Split signed token into payload and signature
-	parts := strings.Split(signedToken, ".")
-	if len(parts) != 4 {
-		return "", "", time.Time{}, fmt.Errorf("invalid signed token format")
+	// Generate secure session token
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return nil, fmt.Errorf("failed to generate session token: %w", err)
 	}
-	
-	token = parts[0]
-	email = parts[1]
-	expiryStr := parts[2]
-	providedSignature := parts[3]
-	
-	// Recreate payload and verify signature
-	payload := fmt.Sprintf("%s.%s.%s", token, email, expiryStr)
-	h := hmac.New(sha256.New, []byte(secrets.SigningSecret))
-	h.Write([]byte(payload))
-	expectedSignature := base64.URLEncoding.EncodeToString(h.Sum(nil))
-	
-	if !hmac.Equal([]byte(expectedSignature), []byte(providedSignature)) {
-		return "", "", time.Time{}, fmt.Errorf("invalid token signature")
-	}
-	
-	// Parse expiry time
-	var expiryUnix int64
-	_, err = fmt.Sscanf(expiryStr, "%d", &expiryUnix)
+	sessionToken := hex.EncodeToString(tokenBytes)
+	expiresAt := time.Now().Add(30 * 24 * time.Hour)
+
+	_, err = db.Exec(ctx, `
+		INSERT INTO sessions (user_id, token, expires_at)
+		VALUES ($1, $2, $3)
+	`, u.ID, sessionToken, expiresAt)
 	if err != nil {
-		return "", "", time.Time{}, fmt.Errorf("invalid expiry time")
+		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
-	expiresAt = time.Unix(expiryUnix, 0)
-	
-	// Check if token has expired
-	if time.Now().After(expiresAt) {
-		return "", "", time.Time{}, fmt.Errorf("token has expired")
-	}
-	
-	return token, email, expiresAt, nil
+
+	return &LoginResponse{
+		Token:     sessionToken,
+		ExpiresAt: expiresAt,
+		User:      &u,
+	}, nil
 }
 
-// VerifyEmailParams holds the verification request
+// LogoutResponse holds the logout response.
+type LogoutResponse struct {
+	Message string `json:"message"`
+}
+
+// Logout invalidates the current session.
+//
+//encore:api auth method=POST path=/auth/logout
+func Logout(ctx context.Context) (*LogoutResponse, error) {
+	uid, _ := auth.UserID()
+
+	_, err := db.Exec(ctx, `DELETE FROM sessions WHERE user_id = $1`, uid)
+	if err != nil {
+		return nil, fmt.Errorf("failed to invalidate sessions: %w", err)
+	}
+
+	return &LogoutResponse{Message: "Logged out successfully"}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Email Verification
+// ---------------------------------------------------------------------------
+
 type VerifyEmailParams struct {
 	Token string `query:"token"`
 }
 
-// VerifyEmailResponse holds the verification response
 type VerifyEmailResponse struct {
-	Message string
+	Message string `json:"message"`
 }
 
-// VerifyEmail is an Encore API endpoint that verifies the email using the signed token
+// VerifyEmail verifies a user's email using the signed token from their email.
 //
 //encore:api public method=GET path=/auth/verify/email
 func VerifyEmail(ctx context.Context, params *VerifyEmailParams) (*VerifyEmailResponse, error) {
+	eb := errs.B()
+
 	if params.Token == "" {
-		return nil, &errs.Error{
-			Code:    errs.InvalidArgument,
-			Message: "The link appears to be broken. Please request for another",
-		}
+		return nil, eb.Code(errs.InvalidArgument).Msg("verification token is required").Err()
 	}
-	
-	// Verify and extract data from signed token
-	//token, email, _, err := verifySignedToken(params.Token)
-	//if err != nil {
-	//	return nil, &errs.Error{
-	//		Code:    errs.InvalidArgument,
-	//		Message: fmt.Sprintf("invalid or expired verification token: %v", err),
-	//	}
-	//}
-	
-	// Verify the token exists in database and matches the email
-	// var userID int64
-	// var dbEmail string
-	// err = db.QueryRow(ctx, `
-	//    SELECT user_id, email FROM email_verifications ev
-	//    JOIN users u ON ev.user_id = u.id
-	//    WHERE ev.token = $1 AND u.email = $2
-	// `, token, email).Scan(&userID, &dbEmail)
-	//
-	// if err != nil {
-	//    return nil, &errs.Error{
-	//       Code:    errs.NotFound,
-	//       Message: "invalid verification token",
-	//    }
-	// }
-	
-	// Update user's email_verified status
-	// _, err = db.Exec(ctx, `
-	//    UPDATE users SET email_verified = true WHERE id = $1
-	// `, userID)
-	//
-	// if err != nil {
-	//    return nil, fmt.Errorf("failed to verify email: %w", err)
-	// }
-	
-	// Delete the used verification token
-	// _, err = db.Exec(ctx, `
-	//    DELETE FROM email_verifications WHERE token = $1
-	// `, token)
-	
-	return &VerifyEmailResponse{
-		Message: "Email verified successfully! You can now log in.",
-	}, nil
+
+	rawToken, email, _, err := verifySignedToken(params.Token)
+	if err != nil {
+		return nil, eb.Code(errs.InvalidArgument).Msg("invalid or expired verification link").Err()
+	}
+
+	// Confirm token exists in DB and belongs to this email
+	var userID string
+	err = db.QueryRow(ctx, `
+		SELECT ev.user_id FROM email_verifications ev
+		JOIN users u ON ev.user_id = u.id
+		WHERE ev.token = $1 AND u.email = $2 AND ev.expires_at > NOW()
+	`, rawToken, email).Scan(&userID)
+	if errors.Is(err, sqldb.ErrNoRows) {
+		return nil, eb.Code(errs.NotFound).Msg("invalid or expired verification link").Err()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("verification lookup failed: %w", err)
+	}
+
+	_, err = db.Exec(ctx, `UPDATE users SET email_verified = true, updated_at = NOW() WHERE id = $1`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to verify email: %w", err)
+	}
+
+	_, _ = db.Exec(ctx, `DELETE FROM email_verifications WHERE token = $1`, rawToken)
+
+	// Fetch name for welcome email
+	var name string
+	_ = db.QueryRow(ctx, `SELECT name FROM users WHERE id = $1`, userID).Scan(&name)
+	_ = mailer.SendTemplate(ctx, &mailer.SendTemplateRequest{
+		To:           email,
+		TemplateName: "welcome",
+		Data:         map[string]string{"name": name},
+	})
+
+	return &VerifyEmailResponse{Message: "Email verified successfully. You can now log in."}, nil
 }
 
-// ResendVerificationEmailParams holds the resend request
+// ---------------------------------------------------------------------------
+// Resend Verification
+// ---------------------------------------------------------------------------
+
 type ResendVerificationEmailParams struct {
 	Email string `json:"email"`
-	Name  string `json:"name"`
 }
 
-// ResendVerificationEmailResponse holds the resend response
 type ResendVerificationEmailResponse struct {
-	Message string
+	Message string `json:"message"`
 }
 
-// ResendVerificationEmail is an Encore API endpoint that resends the verification email
+// ResendVerificationEmail resends the verification email for an unverified account.
 //
 //encore:api public method=POST path=/auth/resend-verification
 func ResendVerificationEmail(ctx context.Context, params *ResendVerificationEmailParams) (*ResendVerificationEmailResponse, error) {
+	eb := errs.B()
+
 	if params.Email == "" {
-		return nil, &errs.Error{
-			Code:    errs.InvalidArgument,
-			Message: "email is required",
-		}
+		return nil, eb.Code(errs.InvalidArgument).Msg("email is required").Err()
 	}
-	
-	// Check if user exists and is not already verified
-	// var userID int64
-	// var name string
-	// var emailVerified bool
-	// err := db.QueryRow(ctx, `
-	//    SELECT id, name, email_verified FROM users WHERE email = $1
-	// `, params.Email).Scan(&userID, &name, &emailVerified)
-	//
-	// if err != nil {
-	//    return nil, &errs.Error{
-	//       Code:    errs.NotFound,
-	//       Message: "user not found",
-	//    }
-	// }
-	//
-	// if emailVerified {
-	//    return nil, &errs.Error{
-	//       Code:    errs.InvalidArgument,
-	//       Message: "email already verified",
-	//    }
-	// }
-	
-	// Delete old verification tokens
-	// _, err = db.Exec(ctx, `
-	//    DELETE FROM email_verifications WHERE user_id = $1
-	// `, userID)
-	
-	if _, err := sendVerificationEmailWithToken(ctx, params.Email, params.Name); err != nil {
-		//if token, err := sendVerificationEmailWithToken(ctx, req.Email, req.Name); err != nil {
-		// Log the error but don't fail registration
-		fmt.Printf("Failed to send verification email: %v\n", err)
+
+	var userID, name string
+	var emailVerified bool
+	err := db.QueryRow(ctx, `
+		SELECT id, name, email_verified FROM users WHERE email = $1
+	`, params.Email).Scan(&userID, &name, &emailVerified)
+	if errors.Is(err, sqldb.ErrNoRows) {
+		// Don't reveal whether the account exists
+		return &ResendVerificationEmailResponse{
+			Message: "If an unverified account exists with that email, a new verification link has been sent.",
+		}, nil
 	}
-	
-	// Store verification token
-	// _, err = db.Exec(ctx, `
-	//    INSERT INTO email_verifications (user_id, token, expires_at)
-	//    VALUES ($1, $2, $3)
-	// `, userID, token, expiresAt)
-	//
-	// if err != nil {
-	//    return nil, fmt.Errorf("failed to store verification token: %w", err)
-	// }
-	
+	if err != nil {
+		return nil, fmt.Errorf("lookup failed: %w", err)
+	}
+
+	if emailVerified {
+		return nil, eb.Code(errs.FailedPrecondition).Msg("email is already verified").Err()
+	}
+
+	// Invalidate old tokens
+	_, _ = db.Exec(ctx, `DELETE FROM email_verifications WHERE user_id = $1`, userID)
+
+	token, expiresAt, err := createAndStoreVerificationToken(ctx, userID, params.Email)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create verification token: %w", err)
+	}
+
+	signedToken := signToken(token, params.Email, expiresAt)
+	verificationURL := fmt.Sprintf("https://yourdomain.com/auth/verify/email?token=%s", signedToken)
+	if err := mailer.SendTemplate(ctx, &mailer.SendTemplateRequest{
+		To:           params.Email,
+		TemplateName: "verification",
+		Data:         map[string]string{"name": name, "url": verificationURL},
+	}); err != nil {
+		return nil, fmt.Errorf("failed to send verification email: %w", err)
+	}
+
 	return &ResendVerificationEmailResponse{
-		Message: "Verification email sent successfully",
+		Message: "If an unverified account exists with that email, a new verification link has been sent.",
 	}, nil
 }
 
-type PasswordRules struct {
+// ---------------------------------------------------------------------------
+// Change Password
+// ---------------------------------------------------------------------------
+
+type ChangePasswordRequest struct {
+	OldPassword     string `json:"old_password"`
+	NewPassword     string `json:"new_password"`
+	ConfirmPassword string `json:"confirm_password"`
+}
+
+// ChangePassword updates the authenticated user's password and invalidates all sessions.
+//
+//encore:api auth method=POST path=/auth/change-password
+func ChangePassword(ctx context.Context, req *ChangePasswordRequest) error {
+	eb := errs.B()
+	uid, _ := auth.UserID()
+
+	if req.OldPassword == "" || req.NewPassword == "" || req.ConfirmPassword == "" {
+		return eb.Code(errs.InvalidArgument).Msg("all fields are required").Err()
+	}
+
+	if err := validatePassword(req.NewPassword, defaultRules); err != nil {
+		return eb.Code(errs.InvalidArgument).Msg(err.Error()).Err()
+	}
+
+	if req.NewPassword != req.ConfirmPassword {
+		return eb.Code(errs.InvalidArgument).Msg("passwords do not match").Err()
+	}
+
+	var storedHash string
+	err := db.QueryRow(ctx, `SELECT password_hash FROM users WHERE id = $1`, uid).Scan(&storedHash)
+	if err != nil {
+		return fmt.Errorf("failed to fetch user: %w", err)
+	}
+
+	match, err := compareHash(req.OldPassword, storedHash)
+	if err != nil || !match {
+		return eb.Code(errs.Unauthenticated).Msg("current password is incorrect").Err()
+	}
+
+	// Prevent reusing the same password
+	samePassword, _ := compareHash(req.NewPassword, storedHash)
+	if samePassword {
+		return eb.Code(errs.InvalidArgument).Msg("new password must be different from the current password").Err()
+	}
+
+	newHash, err := hashPassword(req.NewPassword)
+	if err != nil {
+		return eb.Code(errs.Internal).Msg("failed to process password").Err()
+	}
+
+	_, err = db.Exec(ctx, `
+		UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2
+	`, newHash, uid)
+	if err != nil {
+		return fmt.Errorf("failed to update password: %w", err)
+	}
+
+	// Invalidate all sessions to force re-login
+	_, _ = db.Exec(ctx, `DELETE FROM sessions WHERE user_id = $1`, uid)
+
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Me — get current user profile
+// ---------------------------------------------------------------------------
+
+// Me returns the authenticated user's profile.
+//
+//encore:api auth method=GET path=/auth/me
+func Me(ctx context.Context) (*User, error) {
+	uid, _ := auth.UserID()
+
+	var u User
+	err := db.QueryRow(ctx, `
+		SELECT id, name, email, email_verified, created_at
+		FROM users WHERE id = $1
+	`, uid).Scan(&u.ID, &u.Name, &u.Email, &u.EmailVerified, &u.CreatedAt)
+	if errors.Is(err, sqldb.ErrNoRows) {
+		return nil, errs.B().Code(errs.NotFound).Msg("user not found").Err()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch user: %w", err)
+	}
+
+	return &u, nil
+}
+
+// ---------------------------------------------------------------------------
+// Password helpers
+// ---------------------------------------------------------------------------
+
+type passwordRules struct {
 	MinLength      int
 	RequireUpper   bool
 	RequireLower   bool
@@ -373,7 +479,7 @@ type PasswordRules struct {
 	RequireSpecial bool
 }
 
-var defaultRules = PasswordRules{
+var defaultRules = passwordRules{
 	MinLength:      8,
 	RequireUpper:   true,
 	RequireLower:   true,
@@ -381,26 +487,25 @@ var defaultRules = PasswordRules{
 	RequireSpecial: true,
 }
 
-func ValidatePassword(password string, rules PasswordRules) error {
+func validatePassword(password string, rules passwordRules) error {
 	if len(password) < rules.MinLength {
-		return errors.New("password must be at least 8 characters long")
+		return fmt.Errorf("password must be at least %d characters long", rules.MinLength)
 	}
-	
+
 	var hasUpper, hasLower, hasNumber, hasSpecial bool
-	
-	for _, char := range password {
+	for _, ch := range password {
 		switch {
-		case unicode.IsUpper(char):
+		case unicode.IsUpper(ch):
 			hasUpper = true
-		case unicode.IsLower(char):
+		case unicode.IsLower(ch):
 			hasLower = true
-		case unicode.IsNumber(char):
+		case unicode.IsNumber(ch):
 			hasNumber = true
-		case unicode.IsPunct(char) || unicode.IsSymbol(char):
+		case unicode.IsPunct(ch) || unicode.IsSymbol(ch):
 			hasSpecial = true
 		}
 	}
-	
+
 	if rules.RequireUpper && !hasUpper {
 		return errors.New("password must contain at least one uppercase letter")
 	}
@@ -413,22 +518,26 @@ func ValidatePassword(password string, rules PasswordRules) error {
 	if rules.RequireSpecial && !hasSpecial {
 		return errors.New("password must contain at least one special character")
 	}
-	
+
 	return nil
 }
 
-func ValidatePasswordMatch(password, confirmPassword string) error {
-	if password != confirmPassword {
-		return errors.New("passwords do not match")
-	}
-	return nil
-}
+// ---------------------------------------------------------------------------
+// Argon2id
+// ---------------------------------------------------------------------------
 
-type Argon2Configuration struct {
+type argon2Config struct {
 	TimeCost   uint32
 	MemoryCost uint32
 	Threads    uint8
 	KeyLength  uint32
+}
+
+var defaultArgon2Config = &argon2Config{
+	TimeCost:   2,
+	MemoryCost: 64 * 1024,
+	Threads:    4,
+	KeyLength:  32,
 }
 
 func hashPassword(password string) (string, error) {
@@ -436,144 +545,139 @@ func hashPassword(password string) (string, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return "", fmt.Errorf("salt generation failed: %w", err)
 	}
-	
-	config := &Argon2Configuration{
-		TimeCost:   2,
-		MemoryCost: 64 * 1024,
-		Threads:    4,
-		KeyLength:  32,
-	}
-	
-	hash := argon2.IDKey(
-		[]byte(password),
-		salt,
-		config.TimeCost,
-		config.MemoryCost,
-		config.Threads,
-		config.KeyLength,
-	)
-	
+
+	cfg := defaultArgon2Config
+	hash := argon2.IDKey([]byte(password), salt, cfg.TimeCost, cfg.MemoryCost, cfg.Threads, cfg.KeyLength)
+
 	return fmt.Sprintf(
 		"$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
 		argon2.Version,
-		config.MemoryCost,
-		config.TimeCost,
-		config.Threads,
+		cfg.MemoryCost,
+		cfg.TimeCost,
+		cfg.Threads,
 		base64.RawStdEncoding.EncodeToString(salt),
 		base64.RawStdEncoding.EncodeToString(hash),
 	), nil
 }
 
 func compareHash(password, storedHash string) (bool, error) {
-	config, salt, hash, err := parseArgon2Hash(storedHash)
+	cfg, salt, hash, err := parseArgon2Hash(storedHash)
 	if err != nil {
-		return false, err // Already wrapped in parseArgon2Hash
+		return false, err
 	}
-	
-	computedHash := argon2.IDKey(
-		[]byte(password),
-		salt,
-		config.TimeCost,
-		config.MemoryCost,
-		config.Threads,
-		config.KeyLength,
-	)
-	
-	return subtle.ConstantTimeCompare(hash, computedHash) == 1, nil
+
+	computed := argon2.IDKey([]byte(password), salt, cfg.TimeCost, cfg.MemoryCost, cfg.Threads, cfg.KeyLength)
+	return subtle.ConstantTimeCompare(hash, computed) == 1, nil
 }
 
-func parseArgon2Hash(encodedHash string) (*Argon2Configuration, []byte, []byte, error) {
-	components := strings.Split(encodedHash, "$")
-	if len(components) != 6 {
-		return nil, nil, nil, errors.New("invalid hash format: expected 6 components")
+func parseArgon2Hash(encoded string) (*argon2Config, []byte, []byte, error) {
+	parts := strings.Split(encoded, "$")
+	if len(parts) != 6 {
+		return nil, nil, nil, errors.New("invalid hash format")
 	}
-	
-	if components[1] != "argon2id" {
-		return nil, nil, nil, fmt.Errorf("unsupported algorithm: %s", components[1])
+	if parts[1] != "argon2id" {
+		return nil, nil, nil, fmt.Errorf("unsupported algorithm: %s", parts[1])
 	}
-	
+
 	var version int
-	if _, err := fmt.Sscanf(components[2], "v=%d", &version); err != nil {
-		return nil, nil, nil, fmt.Errorf("invalid version format: %w", err)
+	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil {
+		return nil, nil, nil, fmt.Errorf("invalid version: %w", err)
 	}
 	if version != argon2.Version {
-		return nil, nil, nil, fmt.Errorf("unsupported version: %d", version)
+		return nil, nil, nil, fmt.Errorf("unsupported argon2 version: %d", version)
 	}
-	
-	config := &Argon2Configuration{}
-	if _, err := fmt.Sscanf(components[3], "m=%d,t=%d,p=%d",
-		&config.MemoryCost, &config.TimeCost, &config.Threads); err != nil {
-		return nil, nil, nil, fmt.Errorf("invalid parameters format: %w", err)
+
+	cfg := &argon2Config{}
+	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &cfg.MemoryCost, &cfg.TimeCost, &cfg.Threads); err != nil {
+		return nil, nil, nil, fmt.Errorf("invalid params: %w", err)
 	}
-	
-	salt, err := base64.RawStdEncoding.DecodeString(components[4])
+
+	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("salt decoding failed: %w", err)
+		return nil, nil, nil, fmt.Errorf("salt decode failed: %w", err)
 	}
-	
-	hash, err := base64.RawStdEncoding.DecodeString(components[5])
+
+	hash, err := base64.RawStdEncoding.DecodeString(parts[5])
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("hash decoding failed: %w", err)
+		return nil, nil, nil, fmt.Errorf("hash decode failed: %w", err)
 	}
-	
-	config.KeyLength = uint32(len(hash))
-	
-	return config, salt, hash, nil
+
+	cfg.KeyLength = uint32(len(hash))
+	return cfg, salt, hash, nil
 }
 
-type ChangePasswordRequest struct {
-	OldPassword     string `json:"oldPassword"`
-	NewPassword     string `json:"newPassword"`
-	ConfirmPassword string `json:"confirmPassword"`
+// ---------------------------------------------------------------------------
+// Token helpers
+// ---------------------------------------------------------------------------
+
+func createAndStoreVerificationToken(ctx context.Context, userID, email string) (string, time.Time, error) {
+	rawBytes := make([]byte, 32)
+	if _, err := rand.Read(rawBytes); err != nil {
+		return "", time.Time{}, fmt.Errorf("token generation failed: %w", err)
+	}
+	token := hex.EncodeToString(rawBytes)
+	expiresAt := time.Now().Add(24 * time.Hour)
+
+	_, err := db.Exec(ctx, `
+		INSERT INTO email_verifications (user_id, token, expires_at)
+		VALUES ($1, $2, $3)
+	`, userID, token, expiresAt)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("failed to store token: %w", err)
+	}
+
+	return token, expiresAt, nil
 }
 
-//encore:api public method=POST path=/auth/change-password
+// signToken creates a signed token: rawToken.email.expiry.signature
+func signToken(token, email string, expiresAt time.Time) string {
+	expiry := fmt.Sprintf("%d", expiresAt.Unix())
+	payload := fmt.Sprintf("%s.%s.%s", token, email, expiry)
 
-func ChangePassword(ctx context.Context, req *ChangePasswordRequest) error {
-	// Get current user ID from auth context
-	// userID := auth.UserID()
-	
-	// TODO: Fetch user from database
-	// TODO: Verify current password with VerifyPassword(storedHash, req.CurrentPassword)
-	
-	// Validate new password rules
-	if err := ValidatePassword(req.NewPassword, defaultRules); err != nil {
-		return &errs.Error{
-			Code:    errs.InvalidArgument,
-			Message: err.Error(),
-		}
+	h := hmac.New(sha256.New, []byte(secrets.SigningSecret))
+	h.Write([]byte(payload))
+	sig := base64.URLEncoding.EncodeToString(h.Sum(nil))
+
+	return fmt.Sprintf("%s.%s", payload, sig)
+}
+
+// verifySignedToken validates signature and expiry, returns (rawToken, email, expiresAt).
+func verifySignedToken(signedToken string) (string, string, time.Time, error) {
+	parts := strings.Split(signedToken, ".")
+	if len(parts) != 4 {
+		return "", "", time.Time{}, errors.New("invalid token format")
 	}
-	
-	// Validate password match
-	if err := ValidatePasswordMatch(req.NewPassword, req.ConfirmPassword); err != nil {
-		return &errs.Error{
-			Code:    errs.InvalidArgument,
-			Message: err.Error(),
-		}
+
+	rawToken, email, expiryStr, providedSig := parts[0], parts[1], parts[2], parts[3]
+	payload := fmt.Sprintf("%s.%s.%s", rawToken, email, expiryStr)
+
+	h := hmac.New(sha256.New, []byte(secrets.SigningSecret))
+	h.Write([]byte(payload))
+	expectedSig := base64.URLEncoding.EncodeToString(h.Sum(nil))
+
+	if !hmac.Equal([]byte(expectedSig), []byte(providedSig)) {
+		return "", "", time.Time{}, errors.New("invalid token signature")
 	}
-	
-	// Ensure new password is different from old
-	// if err := VerifyPassword(storedHash, req.NewPassword); err == nil {
-	//     return &errs.Error{
-	//         Code:    errs.InvalidArgument,
-	//         Message: "new password must be different from current password",
-	//     }
-	// }
-	
-	// Hash new password
-	hashedPassword, err := hashPassword(req.NewPassword)
-	if err != nil {
-		return &errs.Error{
-			Code:    errs.Internal,
-			Message: "failed to process password",
-		}
+
+	var expiryUnix int64
+	if _, err := fmt.Sscanf(expiryStr, "%d", &expiryUnix); err != nil {
+		return "", "", time.Time{}, errors.New("invalid token expiry")
 	}
-	
-	// TODO: Update password in database
-	// TODO: Invalidate all existing sessions
-	// TODO: Send confirmation email
-	
-	_ = hashedPassword // Use the hashed password in your DB update
-	
-	return nil
+
+	expiresAt := time.Unix(expiryUnix, 0)
+	if time.Now().After(expiresAt) {
+		return "", "", time.Time{}, errors.New("token has expired")
+	}
+
+	return rawToken, email, expiresAt, nil
+}
+
+// ---------------------------------------------------------------------------
+// Validation helpers
+// ---------------------------------------------------------------------------
+
+var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9.!#$%&'*+/=?^_` + "`" + `{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`)
+
+func isValidEmail(email string) bool {
+	return emailRegex.MatchString(email)
 }
